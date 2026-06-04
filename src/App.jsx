@@ -1,10 +1,14 @@
-import { useState, useRef, useCallback } from "react";
-import {
-  BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend,
-  ResponsiveContainer, AreaChart, Area, Cell,
-} from "recharts";
+import { useState, useEffect, useRef } from "react";
+import { createClient } from "@supabase/supabase-js";
+import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, AreaChart, Area, Cell } from "recharts";
 
-/* ─── Design tokens ─────────────────────────────────────────── */
+/* ── Supabase ───────────────────────────────────────────────── */
+const sb = createClient(
+  import.meta.env.VITE_SUPABASE_URL,
+  import.meta.env.VITE_SUPABASE_ANON_KEY
+);
+
+/* ── Design tokens ──────────────────────────────────────────── */
 const NAV    = "#0D1B2A";
 const TEAL   = "#06D6A0";
 const BG     = "#F0F4F8";
@@ -13,1035 +17,937 @@ const TEXT   = "#1C2B3A";
 const MUTED  = "#64748B";
 const BORDER = "#E2E8F0";
 
-/* ─── Utilization colour scale ──────────────────────────────── */
-function utilColor(pct) {
-  if (pct === 0)    return { bg:"#F1F5F9", fg:"#94A3B8" };
-  if (pct < 50)     return { bg:"#FEE2E2", fg:"#991B1B" };
-  if (pct < 75)     return { bg:"#FEF3C7", fg:"#92400E" };
-  if (pct <= 100)   return { bg:"#D1FAE5", fg:"#065F46" };
-  return              { bg:"#EDE9FE", fg:"#4C1D95" };
+const ROLE_COLORS = { admin:"#8B5CF6", manager:"#3B82F6", user:"#10B981" };
+const AVA_COLORS  = ["#06D6A0","#8B5CF6","#3B82F6","#F59E0B","#EF4444","#10B981","#EC4899","#F97316"];
+
+function utilColor(p) {
+  if (p===0)    return { bg:"#F1F5F9",fg:"#94A3B8" };
+  if (p<50)     return { bg:"#FEE2E2",fg:"#991B1B" };
+  if (p<75)     return { bg:"#FEF3C7",fg:"#92400E" };
+  if (p<=100)   return { bg:"#D1FAE5",fg:"#065F46" };
+  return               { bg:"#EDE9FE",fg:"#4C1D95" };
 }
 
-/* ─── CSV parser ────────────────────────────────────────────── */
-function parseCSV(text) {
-  const rows = text.trim().split(/\r?\n/);
-  if (rows.length < 2) return [];
-  const headers = rows[0].split(",").map(h => h.trim().toLowerCase().replace(/\s+/g,"_"));
-  return rows.slice(1).map((row, idx) => {
-    const vals = row.split(",").map(v => v.trim().replace(/^"|"$/g,""));
-    const obj  = { id: Date.now() + idx };
-    headers.forEach((h, i) => { obj[h] = vals[i] || ""; });
-    return obj;
-  });
+/* ── Shared UI ──────────────────────────────────────────────── */
+function Av({ name="?", color=TEAL, sz=32 }) {
+  const init=(name).split(" ").map(p=>p[0]).join("").slice(0,2).toUpperCase();
+  return <div style={{ width:sz,height:sz,borderRadius:"50%",background:color+"22",color,fontWeight:700,
+    fontSize:sz*.33,display:"flex",alignItems:"center",justifyContent:"center",
+    border:"1.5px solid "+color+"44",flexShrink:0 }}>{init}</div>;
 }
-
-/* ─── Map CSV row to Employee shape ─────────────────────────── */
-const DEPT_COLORS = {
-  "Engineering": "#3B82F6","Design": "#8B5CF6","Product": "#F59E0B",
-  "QA": "#10B981","HR": "#EC4899","Finance": "#F97316","Marketing": "#06D6A0",
-};
-function deptColor(dept) { return DEPT_COLORS[dept] || "#64748B"; }
-
-function rowToEmployee(row, idx) {
-  const name = row.name || row.full_name || row.employee_name || ("Employee "+(idx+1));
-  const dept = row.department || row.dept || "General";
-  return {
-    id:       row.id || Date.now()+idx,
-    name,
-    email:    row.email || row.email_address || "",
-    dept,
-    role:     row.role || row.job_title || row.title || "Team Member",
-    capacity: parseInt(row.weekly_capacity || row.capacity || row.hours || "40", 10) || 40,
-    init:     name.split(" ").map(p => p[0]).join("").slice(0,2).toUpperCase(),
-    color:    deptColor(dept),
-    active:   true,
-  };
+function RoleBadge({ role }) {
+  const c=ROLE_COLORS[role]||MUTED;
+  return <span style={{ background:c+"22",color:c,borderRadius:6,padding:"2px 8px",fontSize:11,fontWeight:700,textTransform:"capitalize" }}>{role}</span>;
 }
-
-/* ─── Seed data ──────────────────────────────────────────────── */
-const SEED_EMP = [
-  { id:1, name:"Alex Chen",    email:"alex@corp.com",   dept:"Engineering", role:"Sr. Engineer",  capacity:40, init:"AC", color:"#3B82F6", active:true },
-  { id:2, name:"Sarah Kim",    email:"sarah@corp.com",  dept:"Design",      role:"Lead Designer", capacity:40, init:"SK", color:"#8B5CF6", active:true },
-  { id:3, name:"Marcus Wells", email:"marcus@corp.com", dept:"Engineering", role:"Engineer",      capacity:40, init:"MW", color:"#3B82F6", active:true },
-  { id:4, name:"Priya Patel",  email:"priya@corp.com",  dept:"Product",     role:"Product Mgr",   capacity:32, init:"PP", color:"#F59E0B", active:true },
-  { id:5, name:"Tom Reynolds", email:"tom@corp.com",    dept:"Engineering", role:"Engineer",      capacity:40, init:"TR", color:"#3B82F6", active:true },
-  { id:6, name:"Zoe Martinez", email:"zoe@corp.com",    dept:"QA",          role:"QA Lead",       capacity:32, init:"ZM", color:"#10B981", active:true },
-];
-
-const SEED_PROJ = [
-  { id:1, name:"Platform Redesign",   client:"Internal",    status:"active",   start:"2026-01-01", end:"2026-08-31" },
-  { id:2, name:"Mobile App v2.0",     client:"RetailCo",    status:"active",   start:"2026-02-01", end:"2026-09-30" },
-  { id:3, name:"Analytics Dashboard", client:"DataCorp",    status:"review",   start:"2026-01-15", end:"2026-06-30" },
-  { id:4, name:"API Integration",     client:"FinTech Ltd", status:"planning", start:"2026-05-01", end:"2026-12-31" },
-];
-
-/* allocatedHours = hours per week on this project */
-const SEED_ALLOC = [
-  { id:1, empId:1, projId:2, hoursPerWeek:20 },
-  { id:2, empId:1, projId:1, hoursPerWeek:16 },
-  { id:3, empId:2, projId:1, hoursPerWeek:32 },
-  { id:4, empId:3, projId:2, hoursPerWeek:30 },
-  { id:5, empId:3, projId:4, hoursPerWeek:8  },
-  { id:6, empId:4, projId:1, hoursPerWeek:16 },
-  { id:7, empId:4, projId:3, hoursPerWeek:12 },
-  { id:8, empId:5, projId:2, hoursPerWeek:36 },
-  { id:9, empId:6, projId:3, hoursPerWeek:24 },
-];
-
-/* Weekly time entries  -  week = "YYYY-WNN" */
-const WEEKS = ["2026-W18","2026-W19","2026-W20","2026-W21","2026-W22","2026-W23"];
-const SEED_ENTRIES = [
-  { id:1,  empId:1, projId:2, week:"2026-W21", hours:18, note:"Offline sync"       },
-  { id:2,  empId:1, projId:1, week:"2026-W21", hours:16, note:"Component library"  },
-  { id:3,  empId:2, projId:1, week:"2026-W21", hours:34, note:"Figma designs"      },
-  { id:4,  empId:3, projId:2, week:"2026-W21", hours:28, note:"Push notifications" },
-  { id:5,  empId:3, projId:4, week:"2026-W21", hours:6,  note:"API docs"           },
-  { id:6,  empId:4, projId:1, week:"2026-W21", hours:14, note:"User research"      },
-  { id:7,  empId:5, projId:2, week:"2026-W21", hours:40, note:"Auth module"        },
-  { id:8,  empId:6, projId:3, week:"2026-W21", hours:22, note:"Test automation"    },
-  { id:9,  empId:1, projId:2, week:"2026-W20", hours:20, note:""                   },
-  { id:10, empId:2, projId:1, week:"2026-W20", hours:30, note:""                   },
-  { id:11, empId:3, projId:2, week:"2026-W20", hours:32, note:""                   },
-  { id:12, empId:5, projId:2, week:"2026-W20", hours:38, note:""                   },
-  { id:13, empId:6, projId:3, week:"2026-W20", hours:28, note:""                   },
-  { id:14, empId:1, projId:1, week:"2026-W19", hours:15, note:""                   },
-  { id:15, empId:2, projId:1, week:"2026-W19", hours:36, note:""                   },
-  { id:16, empId:3, projId:2, week:"2026-W19", hours:34, note:""                   },
-  { id:17, empId:5, projId:2, week:"2026-W19", hours:40, note:""                   },
-];
-
-const SEED_LEAVES = [
-  { id:1, empId:2, type:"Annual", from:"2026-06-05", to:"2026-06-09", days:5, status:"pending",  reason:"Family vacation"    },
-  { id:2, empId:5, type:"Sick",   from:"2026-05-28", to:"2026-05-28", days:1, status:"approved", reason:"Medical"            },
-  { id:3, empId:3, type:"Annual", from:"2026-07-01", to:"2026-07-05", days:5, status:"pending",  reason:"Personal travel"    },
-];
-
-/* ─── Helpers ────────────────────────────────────────────────── */
-function currentWeek() {
-  const now  = new Date();
-  const jan1 = new Date(now.getFullYear(), 0, 1);
-  const wk   = Math.ceil(((now - jan1) / 864e5 + jan1.getDay() + 1) / 7);
-  return now.getFullYear() + "-W" + String(wk).padStart(2, "0");
-}
-
-function empUtil(empId, week, entries, allocs, employees) {
-  const emp   = employees.find(e => e.id === empId);
-  if (!emp) return 0;
-  const logged = entries.filter(e => e.empId === empId && e.week === week).reduce((s, e) => s + e.hours, 0);
-  return emp.capacity > 0 ? Math.round((logged / emp.capacity) * 100) : 0;
-}
-
-function empLoggedHours(empId, week, entries) {
-  return entries.filter(e => e.empId === empId && e.week === week).reduce((s, e) => s + e.hours, 0);
-}
-
-function empAllocatedHours(empId, allocs) {
-  return allocs.filter(a => a.empId === empId).reduce((s, a) => s + a.hoursPerWeek, 0);
-}
-
-/* ─── Shared UI ──────────────────────────────────────────────── */
-function Av({ name, color = TEAL, sz = 32 }) {
-  const init = (name || "?").split(" ").map(p => p[0]).join("").slice(0,2).toUpperCase();
-  return (
-    <div style={{ width:sz, height:sz, borderRadius:"50%", background:color+"22", color,
-      fontWeight:700, fontSize:sz*0.33, display:"flex", alignItems:"center", justifyContent:"center",
-      border:"1.5px solid "+color+"44", flexShrink:0 }}>{init}</div>
-  );
-}
-
-const STATUS_MAP = {
-  active:    { bg:"#D1FAE5", fg:"#065F46", label:"Active"    },
-  review:    { bg:"#FEF3C7", fg:"#92400E", label:"In Review" },
-  planning:  { bg:"#DBEAFE", fg:"#1E40AF", label:"Planning"  },
-  completed: { bg:"#F3F4F6", fg:"#374151", label:"Completed" },
-  pending:   { bg:"#FEF3C7", fg:"#92400E", label:"Pending"   },
-  approved:  { bg:"#D1FAE5", fg:"#065F46", label:"Approved"  },
-  rejected:  { bg:"#FEE2E2", fg:"#991B1B", label:"Rejected"  },
+const STATUS_MAP={
+  active:{bg:"#D1FAE5",fg:"#065F46",label:"Active"},inactive:{bg:"#F3F4F6",fg:"#6B7280",label:"Inactive"},
+  pending:{bg:"#FEF3C7",fg:"#92400E",label:"Pending"},approved:{bg:"#D1FAE5",fg:"#065F46",label:"Approved"},
+  rejected:{bg:"#FEE2E2",fg:"#991B1B",label:"Rejected"},planning:{bg:"#DBEAFE",fg:"#1E40AF",label:"Planning"},
+  review:{bg:"#FEF3C7",fg:"#92400E",label:"In Review"},completed:{bg:"#F3F4F6",fg:"#374151",label:"Completed"},
 };
 function Badge({ s }) {
-  const st = STATUS_MAP[s] || { bg:"#F3F4F6", fg:"#374151", label:s };
-  return <span style={{ background:st.bg, color:st.fg, borderRadius:999, padding:"2px 10px", fontSize:11, fontWeight:600, whiteSpace:"nowrap" }}>{st.label}</span>;
+  const st=STATUS_MAP[s]||{bg:"#F3F4F6",fg:"#374151",label:s};
+  return <span style={{ background:st.bg,color:st.fg,borderRadius:999,padding:"2px 10px",fontSize:11,fontWeight:600,whiteSpace:"nowrap" }}>{st.label}</span>;
 }
-
-function Prog({ val, h = 6 }) {
-  const { bg: fill } = utilColor(val);
-  return (
-    <div style={{ background:BORDER, borderRadius:999, height:h, overflow:"hidden", width:"100%" }}>
-      <div style={{ width:Math.min(val,100)+"%", height:"100%", borderRadius:999, background:fill === "#D1FAE5" ? TEAL : fill === "#FEE2E2" ? "#EF4444" : fill === "#FEF3C7" ? "#F59E0B" : fill === "#EDE9FE" ? "#8B5CF6" : BORDER, transition:"width .3s" }} />
-    </div>
-  );
+function Prog({ val,h=6 }) {
+  const clr=val>100?"#8B5CF6":val>=75?TEAL:val>=50?"#F59E0B":"#EF4444";
+  return <div style={{ background:BORDER,borderRadius:999,height:h,overflow:"hidden",width:"100%" }}>
+    <div style={{ width:Math.min(val,100)+"%",height:"100%",borderRadius:999,background:clr,transition:"width .3s" }}/></div>;
 }
-
-function Card({ children, style = {} }) {
-  return <div style={{ background:WHITE, border:"1px solid "+BORDER, borderRadius:12, padding:20, ...style }}>{children}</div>;
+function Card({ children,style={} }) {
+  return <div style={{ background:WHITE,border:"1px solid "+BORDER,borderRadius:12,padding:20,...style }}>{children}</div>;
 }
-function SecHd({ title, action }) {
-  return (
-    <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:14 }}>
-      <span style={{ fontSize:14, fontWeight:700, color:TEXT }}>{title}</span>
-      {action}
-    </div>
-  );
+function SecHd({ title,action }) {
+  return <div style={{ display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:14 }}>
+    <span style={{ fontSize:14,fontWeight:700,color:TEXT }}>{title}</span>{action}</div>;
 }
-function Btn({ children, onClick, primary, danger, small, full, disabled, style:s = {} }) {
-  return (
-    <button onClick={onClick} disabled={disabled} style={{
-      display:"flex", alignItems:"center", gap:6, cursor:disabled?"not-allowed":"pointer", opacity:disabled?0.55:1,
-      padding:small?"5px 12px":"8px 16px", borderRadius:8, fontSize:small?12:13, fontWeight:500,
-      width:full?"100%":undefined, justifyContent:full?"center":undefined,
-      border:primary?"none":danger?"1px solid #FCA5A5":"1px solid "+BORDER,
-      background:primary?TEAL:danger?"#FEE2E2":WHITE,
-      color:primary?"#fff":danger?"#991B1B":"#374151", ...s }}>{children}</button>
-  );
+function Btn({ children,onClick,primary,danger,ghost,small,full,disabled,style:s={} }) {
+  return <button onClick={onClick} disabled={disabled} style={{
+    display:"flex",alignItems:"center",gap:6,cursor:disabled?"not-allowed":"pointer",opacity:disabled?0.55:1,
+    padding:small?"5px 12px":"8px 16px",borderRadius:8,fontSize:small?12:13,fontWeight:500,
+    width:full?"100%":undefined,justifyContent:full?"center":undefined,
+    border:primary?"none":danger?"1px solid #FCA5A5":ghost?"none":"1px solid "+BORDER,
+    background:primary?TEAL:danger?"#FEE2E2":ghost?"transparent":WHITE,
+    color:primary?"#fff":danger?"#991B1B":TEXT,...s }}>{children}</button>;
 }
-function KPI({ label, value, sub, icon, alert }) {
-  return (
-    <div style={{ background:WHITE, border:"1px solid "+(alert?"#FCA5A5":BORDER), borderRadius:12, padding:"14px 18px", flex:1, minWidth:140 }}>
-      <div style={{ display:"flex", justifyContent:"space-between", marginBottom:6 }}>
-        <span style={{ fontSize:12, color:MUTED, fontWeight:500 }}>{label}</span>
-        <span style={{ fontSize:18 }}>{icon}</span>
+function Input({ label,type="text",value,onChange,placeholder,required,disabled }) {
+  return <div style={{ marginBottom:14 }}>
+    {label && <label style={{ fontSize:12,fontWeight:600,color:TEXT,display:"block",marginBottom:5 }}>{label}{required&&<span style={{ color:"#EF4444" }}> *</span>}</label>}
+    <input type={type} value={value} onChange={onChange} placeholder={placeholder} disabled={disabled} required={required}
+      style={{ width:"100%",padding:"10px 14px",border:"1.5px solid "+BORDER,borderRadius:8,fontSize:14,
+        color:TEXT,background:disabled?"#F8FAFC":WHITE,boxSizing:"border-box",outline:"none",
+        transition:"border-color .2s" }}
+      onFocus={e=>e.target.style.borderColor=TEAL}
+      onBlur={e=>e.target.style.borderColor=BORDER} /></div>;
+}
+function Sel({ label,value,onChange,options,required }) {
+  return <div style={{ marginBottom:14 }}>
+    {label && <label style={{ fontSize:12,fontWeight:600,color:TEXT,display:"block",marginBottom:5 }}>{label}{required&&<span style={{ color:"#EF4444" }}> *</span>}</label>}
+    <select value={value} onChange={onChange} style={{ width:"100%",padding:"10px 14px",border:"1.5px solid "+BORDER,
+      borderRadius:8,fontSize:14,color:TEXT,background:WHITE,boxSizing:"border-box" }}>
+      {options.map(o=><option key={o.value} value={o.value}>{o.label}</option>)}
+    </select></div>;
+}
+function Spinner({ dark }) {
+  return <span style={{ display:"inline-block",width:16,height:16,
+    border:"2px solid "+(dark?"#E2E8F0":"#ffffff44"),
+    borderTop:"2px solid "+(dark?TEAL:"#fff"),
+    borderRadius:"50%",animation:"spin .7s linear infinite" }}/>;
+}
+function Modal({ title,onClose,children,width=480 }) {
+  return <div style={{ position:"fixed",inset:0,background:"#00000066",display:"flex",alignItems:"center",
+    justifyContent:"center",zIndex:1000,padding:20 }}>
+    <div style={{ background:WHITE,borderRadius:14,padding:28,width:"100%",maxWidth:width,
+      maxHeight:"90vh",overflowY:"auto",boxShadow:"0 20px 60px #0000002a" }}>
+      <div style={{ display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:20 }}>
+        <span style={{ fontSize:17,fontWeight:700,color:TEXT }}>{title}</span>
+        <button onClick={onClose} style={{ border:"none",background:"none",fontSize:22,cursor:"pointer",color:MUTED,lineHeight:1 }}>x</button>
       </div>
-      <div style={{ fontSize:26, fontWeight:800, color:alert?"#EF4444":TEXT, lineHeight:1 }}>{value}</div>
-      {sub && <div style={{ fontSize:12, color:MUTED, marginTop:3 }}>{sub}</div>}
+      {children}
+    </div></div>;
+}
+function KPI({ label,value,sub,icon,alert }) {
+  return <div style={{ background:WHITE,border:"1px solid "+(alert?"#FCA5A5":BORDER),borderRadius:12,
+    padding:"14px 18px",flex:1,minWidth:140 }}>
+    <div style={{ display:"flex",justifyContent:"space-between",marginBottom:6 }}>
+      <span style={{ fontSize:12,color:MUTED,fontWeight:500 }}>{label}</span>
+      <span style={{ fontSize:18 }}>{icon}</span>
+    </div>
+    <div style={{ fontSize:26,fontWeight:800,color:alert?"#EF4444":TEXT,lineHeight:1 }}>{value}</div>
+    {sub&&<div style={{ fontSize:12,color:MUTED,marginTop:3 }}>{sub}</div>}</div>;
+}
+
+/* ── LOGIN PAGE ─────────────────────────────────────────────── */
+function LoginPage({ onLogin }) {
+  const [mode,    setMode]    = useState("login"); // login | forgot | setpwd
+  const [email,   setEmail]   = useState("");
+  const [pwd,     setPwd]     = useState("");
+  const [newPwd,  setNewPwd]  = useState("");
+  const [confirm, setConfirm] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [msg,     setMsg]     = useState({ type:"", text:"" });
+
+  useEffect(() => {
+    const hash = window.location.hash;
+    if (hash.includes("type=invite") || hash.includes("type=recovery")) setMode("setpwd");
+  }, []);
+
+  const showErr = t => setMsg({ type:"error",   text:t });
+  const showOk  = t => setMsg({ type:"success", text:t });
+
+  const doLogin = async e => {
+    e.preventDefault();
+    if (!email||!pwd) return showErr("Email and password are required.");
+    setLoading(true); setMsg({ type:"",text:"" });
+    const { error } = await sb.auth.signInWithPassword({ email, password:pwd });
+    setLoading(false);
+    if (error) showErr(error.message);
+  };
+
+  const doForgot = async e => {
+    e.preventDefault();
+    if (!email) return showErr("Enter your work email.");
+    setLoading(true);
+    const { error } = await sb.auth.resetPasswordForEmail(email, {
+      redirectTo: window.location.origin
+    });
+    setLoading(false);
+    if (error) showErr(error.message);
+    else { showOk("Password reset email sent. Check your inbox."); setTimeout(()=>setMode("login"),3000); }
+  };
+
+  const doSetPwd = async e => {
+    e.preventDefault();
+    if (!newPwd||newPwd.length<8) return showErr("Password must be at least 8 characters.");
+    if (newPwd!==confirm)         return showErr("Passwords do not match.");
+    setLoading(true);
+    const { error } = await sb.auth.updateUser({ password:newPwd });
+    setLoading(false);
+    if (error) showErr(error.message);
+    else { showOk("Password set! Signing you in..."); window.location.hash=""; }
+  };
+
+  const features = ["Track team utilization weekly","Manage timesheets and approvals","Team-based resource planning","Leave management with workflows","Role-based access control"];
+
+  return (
+    <div style={{ display:"flex",height:"100vh",fontFamily:"'Segoe UI',system-ui,sans-serif" }}>
+      {/* Left branding panel */}
+      <div style={{ width:"45%",background:NAV,display:"flex",flexDirection:"column",justifyContent:"center",padding:"60px 52px",flexShrink:0 }}>
+        <div style={{ display:"flex",alignItems:"center",gap:12,marginBottom:48 }}>
+          <div style={{ width:44,height:44,borderRadius:12,background:TEAL,display:"flex",alignItems:"center",
+            justifyContent:"center",fontWeight:900,fontSize:22,color:NAV }}>R</div>
+          <div>
+            <div style={{ fontSize:24,fontWeight:800,color:WHITE }}>ResTrack</div>
+            <div style={{ fontSize:13,color:"#ffffff60" }}>Resource Management Platform</div>
+          </div>
+        </div>
+        <h1 style={{ fontSize:34,fontWeight:800,color:WHITE,margin:"0 0 16px",lineHeight:1.2 }}>
+          Manage your team<br/>with full visibility
+        </h1>
+        <p style={{ fontSize:15,color:"#ffffff80",margin:"0 0 40px",lineHeight:1.7 }}>
+          One platform for timesheets, resource tracking, leave management and team collaboration.
+        </p>
+        <div style={{ display:"flex",flexDirection:"column",gap:14 }}>
+          {features.map((f,i)=>(
+            <div key={i} style={{ display:"flex",alignItems:"center",gap:12 }}>
+              <div style={{ width:22,height:22,borderRadius:"50%",background:TEAL+"33",display:"flex",
+                alignItems:"center",justifyContent:"center",flexShrink:0 }}>
+                <span style={{ color:TEAL,fontSize:12,fontWeight:700 }}>✓</span>
+              </div>
+              <span style={{ fontSize:14,color:"#ffffffcc" }}>{f}</span>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {/* Right form panel */}
+      <div style={{ flex:1,display:"flex",alignItems:"center",justifyContent:"center",background:"#F8FAFC",padding:40 }}>
+        <div style={{ width:"100%",maxWidth:400 }}>
+          {mode==="login" && (
+            <>
+              <h2 style={{ fontSize:26,fontWeight:800,color:TEXT,margin:"0 0 6px" }}>Welcome back</h2>
+              <p style={{ fontSize:14,color:MUTED,margin:"0 0 32px" }}>Sign in to your ResTrack account</p>
+              {msg.text && (
+                <div style={{ padding:"10px 14px",borderRadius:8,marginBottom:16,fontSize:13,
+                  background:msg.type==="error"?"#FEF2F2":"#F0FDF9",
+                  color:msg.type==="error"?"#DC2626":"#065F46",
+                  border:"1px solid "+(msg.type==="error"?"#FCA5A5":"#6EE7B7") }}>{msg.text}</div>
+              )}
+              <form onSubmit={doLogin}>
+                <Input label="Work Email" type="email" value={email} onChange={e=>setEmail(e.target.value)} placeholder="you@company.com" required />
+                <Input label="Password"   type="password" value={pwd} onChange={e=>setPwd(e.target.value)} placeholder="Enter your password" required />
+                <Btn primary full disabled={loading} style={{ marginTop:4,padding:"13px",fontSize:15 }}>
+                  {loading?<><Spinner/>Signing in...</>:"Sign In"}
+                </Btn>
+              </form>
+              <button onClick={()=>{setMode("forgot");setMsg({type:"",text:""}); }} style={{ marginTop:16,fontSize:13,color:MUTED,background:"none",border:"none",cursor:"pointer",display:"block",width:"100%",textAlign:"center" }}>
+                Forgot your password?
+              </button>
+              <div style={{ marginTop:32,padding:"14px 16px",background:WHITE,borderRadius:10,border:"1px solid "+BORDER,fontSize:13,color:MUTED,textAlign:"center",lineHeight:1.6 }}>
+                New to ResTrack? Check your email for an invite<br/>from your administrator.
+              </div>
+            </>
+          )}
+
+          {mode==="forgot" && (
+            <>
+              <button onClick={()=>setMode("login")} style={{ fontSize:13,color:MUTED,background:"none",border:"none",cursor:"pointer",marginBottom:24,display:"flex",alignItems:"center",gap:4 }}>← Back to sign in</button>
+              <h2 style={{ fontSize:24,fontWeight:800,color:TEXT,margin:"0 0 6px" }}>Reset password</h2>
+              <p style={{ fontSize:14,color:MUTED,margin:"0 0 28px" }}>Enter your work email and we will send a reset link.</p>
+              {msg.text && <div style={{ padding:"10px 14px",borderRadius:8,marginBottom:16,fontSize:13,
+                background:msg.type==="error"?"#FEF2F2":"#F0FDF9",color:msg.type==="error"?"#DC2626":"#065F46",
+                border:"1px solid "+(msg.type==="error"?"#FCA5A5":"#6EE7B7") }}>{msg.text}</div>}
+              <form onSubmit={doForgot}>
+                <Input label="Work Email" type="email" value={email} onChange={e=>setEmail(e.target.value)} placeholder="you@company.com" required />
+                <Btn primary full disabled={loading}>
+                  {loading?<><Spinner/>Sending...</>:"Send Reset Link"}
+                </Btn>
+              </form>
+            </>
+          )}
+
+          {mode==="setpwd" && (
+            <>
+              <h2 style={{ fontSize:24,fontWeight:800,color:TEXT,margin:"0 0 6px" }}>Set your password</h2>
+              <p style={{ fontSize:14,color:MUTED,margin:"0 0 28px" }}>Choose a secure password to complete your account setup.</p>
+              {msg.text && <div style={{ padding:"10px 14px",borderRadius:8,marginBottom:16,fontSize:13,
+                background:msg.type==="error"?"#FEF2F2":"#F0FDF9",color:msg.type==="error"?"#DC2626":"#065F46",
+                border:"1px solid "+(msg.type==="error"?"#FCA5A5":"#6EE7B7") }}>{msg.text}</div>}
+              <form onSubmit={doSetPwd}>
+                <Input label="New Password" type="password" value={newPwd} onChange={e=>setNewPwd(e.target.value)} placeholder="At least 8 characters" required />
+                <Input label="Confirm Password" type="password" value={confirm} onChange={e=>setConfirm(e.target.value)} placeholder="Repeat password" required />
+                <Btn primary full disabled={loading}>
+                  {loading?<><Spinner/>Setting password...</>:"Set Password & Sign In"}
+                </Btn>
+              </form>
+            </>
+          )}
+        </div>
+      </div>
     </div>
   );
 }
 
-/* ─── DASHBOARD ──────────────────────────────────────────────── */
-function Dashboard({ employees, projects, allocs, entries, leaves, setView }) {
-  const week = currentWeek();
+/* ── DASHBOARD ──────────────────────────────────────────────── */
+function Dashboard({ user, employees, projects, allocs, entries, leaves, teams, setView }) {
+  const isAdmin   = user.role==="admin";
+  const isManager = user.role==="manager";
 
-  const empStats = employees.filter(e => e.active).map(e => {
-    const logged    = empLoggedHours(e.id, week, entries);
-    const allocated = empAllocatedHours(e.id, allocs);
-    const util      = e.capacity > 0 ? Math.round((logged / e.capacity) * 100) : 0;
-    return { ...e, logged, allocated, util };
+  /* filter data by role */
+  const visibleEmps = isAdmin ? employees
+    : isManager ? employees.filter(e=>e.teamId===user.teamId||e.managerId===user.employeeId)
+    : employees.filter(e=>e.id===user.employeeId);
+
+  const week  = currentWeek();
+  const stats = visibleEmps.filter(e=>e.active).map(e=>{
+    const logged = entries.filter(en=>en.empId===e.id&&en.week===week).reduce((s,en)=>s+en.hours,0);
+    const util   = e.capacity>0?Math.round((logged/e.capacity)*100):0;
+    return { ...e,logged,util };
   });
 
-  const overloaded   = empStats.filter(e => e.util > 100).length;
-  const underutil    = empStats.filter(e => e.util < 50 && e.util > 0).length;
-  const noHours      = empStats.filter(e => e.util === 0).length;
-  const avgUtil      = empStats.length ? Math.round(empStats.reduce((s,e) => s+e.util,0)/empStats.length) : 0;
+  const avgUtil    = stats.length?Math.round(stats.reduce((s,e)=>s+e.util,0)/stats.length):0;
+  const overloaded = stats.filter(e=>e.util>100).length;
+  const pendingLeaves = leaves.filter(l=>l.status==="pending"&&
+    (isAdmin||visibleEmps.find(e=>e.id===l.empId))).length;
 
-  const weeklyChart = WEEKS.map(w => {
-    const totalCap    = employees.filter(e=>e.active).reduce((s,e)=>s+e.capacity,0);
-    const totalLogged = entries.filter(en=>en.week===w).reduce((s,en)=>s+en.hours,0);
-    return { week:w.replace("2026-",""), logged:totalLogged, capacity:totalCap, util:totalCap>0?Math.round((totalLogged/totalCap)*100):0 };
+  const weeklyData = ["W18","W19","W20","W21","W22","W23"].map(w=>{
+    const wk  = "2026-"+w;
+    const cap = visibleEmps.reduce((s,e)=>s+e.capacity,0);
+    const log = entries.filter(en=>en.week===wk&&visibleEmps.find(e=>e.id===en.empId)).reduce((s,en)=>s+en.hours,0);
+    return { week:w, util:cap>0?Math.round((log/cap)*100):0 };
   });
-
-  const projHours = projects.map(p => ({
-    name: p.name.split(" ").slice(0,2).join(" "),
-    hours: entries.filter(e=>e.projId===p.id).reduce((s,e)=>s+e.hours,0),
-  }));
 
   return (
     <div>
       <div style={{ marginBottom:20 }}>
-        <h1 style={{ fontSize:22, fontWeight:800, color:TEXT, margin:"0 0 3px" }}>Dashboard</h1>
-        <p style={{ color:MUTED, fontSize:13, margin:0 }}>Current week: {week}  -  Team utilization overview</p>
+        <h1 style={{ fontSize:22,fontWeight:800,color:TEXT,margin:"0 0 3px" }}>
+          {isAdmin?"Company Overview":isManager?"My Team Overview":"My Dashboard"}
+        </h1>
+        <p style={{ color:MUTED,fontSize:13,margin:0 }}>Week {week} - Good to see you, {user.name?.split(" ")[0]}</p>
       </div>
 
-      <div style={{ display:"flex", gap:10, marginBottom:16, flexWrap:"wrap" }}>
-        <KPI label="Avg Utilization"   value={avgUtil+"%"}                sub="This week"           icon="📊" alert={avgUtil<60} />
-        <KPI label="Active Employees"  value={employees.filter(e=>e.active).length} sub={employees.length+" total"} icon="👥" />
-        <KPI label="Active Projects"   value={projects.filter(p=>p.status==="active").length} sub={projects.length+" total"} icon="📁" />
-        <KPI label="Overloaded"        value={overloaded}  sub="Over 100% capacity" icon="🔴" alert={overloaded>0} />
-        <KPI label="Under-utilized"    value={underutil}   sub="Below 50%"          icon="🟡" />
-        <KPI label="No Hours Logged"   value={noHours}     sub="This week"          icon="⚪" alert={noHours>0} />
+      <div style={{ display:"flex",gap:10,marginBottom:16,flexWrap:"wrap" }}>
+        <KPI label={isAdmin?"All Employees":isManager?"Team Members":"My Projects"}
+          value={isAdmin||isManager?visibleEmps.length:projects.filter(p=>allocs.find(a=>a.empId===user.employeeId&&a.projId===p.id)).length}
+          icon="👥" />
+        <KPI label="Avg Utilization" value={avgUtil+"%"} sub="This week" icon="📊" alert={avgUtil<60} />
+        <KPI label="Overloaded"      value={overloaded}  sub="Over capacity" icon="🔴" alert={overloaded>0} />
+        <KPI label="Pending Leaves"  value={pendingLeaves} sub="Need approval" icon="📅" alert={pendingLeaves>0} />
+        {isAdmin&&<KPI label="Active Projects" value={projects.filter(p=>p.status==="active").length} sub={projects.length+" total"} icon="📁" />}
+        {isAdmin&&<KPI label="Teams"           value={teams.length} sub="Across company" icon="🏢" />}
       </div>
 
-      {(overloaded > 0 || noHours > 0) && (
-        <div style={{ background:"#FFF7ED", border:"1px solid #FED7AA", borderRadius:10, padding:"12px 16px", marginBottom:16 }}>
-          <div style={{ fontSize:13, fontWeight:700, color:"#92400E", marginBottom:8 }}>Attention Required</div>
-          <div style={{ display:"flex", gap:24, flexWrap:"wrap" }}>
-            {empStats.filter(e=>e.util>100).map(e=>(
-              <div key={e.id} style={{ fontSize:12, color:"#C2410C" }}>
-                <strong>{e.name}</strong> is at {e.util}% utilization ({e.logged}h logged / {e.capacity}h capacity)
-              </div>
-            ))}
-            {empStats.filter(e=>e.util===0).map(e=>(
-              <div key={e.id} style={{ fontSize:12, color:"#92400E" }}>
-                <strong>{e.name}</strong> has no hours logged this week
-              </div>
-            ))}
-          </div>
+      {(overloaded>0) && (
+        <div style={{ background:"#FFF7ED",border:"1px solid #FED7AA",borderRadius:10,padding:"12px 16px",marginBottom:16 }}>
+          <div style={{ fontSize:13,fontWeight:700,color:"#92400E",marginBottom:6 }}>Action Required</div>
+          {stats.filter(e=>e.util>100).map(e=>(
+            <div key={e.id} style={{ fontSize:12,color:"#C2410C",marginBottom:3 }}>
+              <strong>{e.name}</strong> is at {e.util}% utilization this week
+            </div>
+          ))}
         </div>
       )}
 
-      <div style={{ display:"grid", gridTemplateColumns:"2fr 1fr", gap:14, marginBottom:14 }}>
+      <div style={{ display:"grid",gridTemplateColumns:"2fr 1fr",gap:14,marginBottom:14 }}>
         <Card>
-          <SecHd title="Weekly Team Utilization (last 6 weeks)" />
-          <ResponsiveContainer width="100%" height={200}>
-            <AreaChart data={weeklyChart}>
+          <SecHd title="Utilization Trend" />
+          <ResponsiveContainer width="100%" height={185}>
+            <AreaChart data={weeklyData}>
               <defs>
                 <linearGradient id="ug" x1="0" y1="0" x2="0" y2="1">
-                  <stop offset="5%"  stopColor={TEAL} stopOpacity={0.2} />
-                  <stop offset="95%" stopColor={TEAL} stopOpacity={0}   />
+                  <stop offset="5%"  stopColor={TEAL} stopOpacity={0.2}/>
+                  <stop offset="95%" stopColor={TEAL} stopOpacity={0}/>
                 </linearGradient>
               </defs>
-              <CartesianGrid strokeDasharray="3 3" stroke="#F1F5F9" />
-              <XAxis dataKey="week" tick={{ fontSize:11, fill:"#94A3B8" }} />
-              <YAxis tick={{ fontSize:11, fill:"#94A3B8" }} domain={[0,100]} unit="%" />
-              <Tooltip formatter={v => [v+"%","Utilization"]} />
-              <Area type="monotone" dataKey="util" stroke={TEAL} fill="url(#ug)" strokeWidth={2} dot={{ r:3, fill:TEAL }} name="Utilization" />
+              <CartesianGrid strokeDasharray="3 3" stroke="#F1F5F9"/>
+              <XAxis dataKey="week" tick={{ fontSize:11,fill:"#94A3B8" }}/>
+              <YAxis tick={{ fontSize:11,fill:"#94A3B8" }} domain={[0,100]} unit="%"/>
+              <Tooltip formatter={v=>[v+"%","Utilization"]}/>
+              <Area type="monotone" dataKey="util" stroke={TEAL} fill="url(#ug)" strokeWidth={2} dot={{ r:3,fill:TEAL }}/>
             </AreaChart>
           </ResponsiveContainer>
         </Card>
-
         <Card>
-          <SecHd title="Hours by Project" />
-          <ResponsiveContainer width="100%" height={200}>
-            <BarChart data={projHours} layout="vertical" margin={{ left:0, right:10 }}>
-              <XAxis type="number" tick={{ fontSize:11, fill:"#94A3B8" }} />
-              <YAxis dataKey="name" type="category" tick={{ fontSize:11, fill:"#94A3B8" }} width={100} />
-              <Tooltip />
-              <Bar dataKey="hours" fill={TEAL} radius={[0,4,4,0]} name="Hours" />
-            </BarChart>
-          </ResponsiveContainer>
+          <SecHd title="This Week" />
+          <div style={{ display:"flex",flexDirection:"column",gap:8 }}>
+            {stats.slice(0,6).map(e=>{
+              const { bg,fg }=utilColor(e.util);
+              return (
+                <div key={e.id} style={{ display:"flex",alignItems:"center",gap:8 }}>
+                  <Av name={e.name} color={e.color||TEAL} sz={26}/>
+                  <div style={{ flex:1,minWidth:0 }}>
+                    <div style={{ fontSize:12,fontWeight:500,color:TEXT,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap" }}>{e.name}</div>
+                    <Prog val={e.util} h={4}/>
+                  </div>
+                  <span style={{ fontSize:11,fontWeight:700,background:bg,color:fg,borderRadius:6,padding:"2px 6px",whiteSpace:"nowrap" }}>{e.util}%</span>
+                </div>
+              );
+            })}
+          </div>
         </Card>
       </div>
 
-      <Card>
-        <SecHd title="This Week  -  Resource Utilization" action={<Btn small onClick={()=>setView("utilization")}>Full Report</Btn>} />
-        <div style={{ display:"grid", gridTemplateColumns:"repeat(3,1fr)", gap:10 }}>
-          {empStats.map(e => {
-            const { bg, fg } = utilColor(e.util);
+      {pendingLeaves>0 && (
+        <Card style={{ border:"1px solid #FDE68A",background:"#FFFBEB" }}>
+          <SecHd title={"Pending Leave Approvals ("+pendingLeaves+")"}
+            action={<Btn small onClick={()=>setView("leaves")}>Review All</Btn>} />
+          {leaves.filter(l=>l.status==="pending").slice(0,3).map(l=>{
+            const emp=employees.find(e=>e.id===l.empId);
             return (
-              <div key={e.id} style={{ display:"flex", alignItems:"center", gap:10, padding:"10px 12px", background:"#F8FAFC", borderRadius:8, border:"1px solid "+BORDER }}>
-                <Av name={e.name} color={e.color} sz={32} />
-                <div style={{ flex:1, minWidth:0 }}>
-                  <div style={{ fontSize:13, fontWeight:600, color:TEXT, whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis" }}>{e.name}</div>
-                  <div style={{ fontSize:11, color:MUTED }}>{e.dept}</div>
-                  <div style={{ marginTop:4 }}>
-                    <Prog val={e.util} h={5} />
-                  </div>
+              <div key={l.id} style={{ display:"flex",alignItems:"center",gap:10,padding:"8px 0",borderBottom:"1px solid #FEF3C7" }}>
+                <Av name={emp?.name||"?"} color={emp?.color||TEAL} sz={26}/>
+                <div style={{ flex:1 }}>
+                  <span style={{ fontSize:13,fontWeight:500 }}>{emp?.name}</span>
+                  <span style={{ fontSize:12,color:MUTED }}> - {l.type} - {l.days} day{l.days>1?"s":""}</span>
+                  <div style={{ fontSize:11,color:"#94A3B8" }}>{l.from} to {l.to}</div>
                 </div>
-                <div style={{ background:bg, color:fg, borderRadius:6, padding:"3px 8px", fontSize:12, fontWeight:700, whiteSpace:"nowrap" }}>
-                  {e.util}%
-                </div>
+                <Badge s="pending"/>
               </div>
             );
           })}
-        </div>
-      </Card>
+        </Card>
+      )}
     </div>
   );
 }
 
-/* ─── EMPLOYEES ──────────────────────────────────────────────── */
-function Employees({ employees, setEmployees, allocs }) {
-  const [tab, setTab]           = useState("list");
-  const [dragOver, setDragOver] = useState(false);
-  const [preview, setPreview]   = useState(null);
-  const [csvError, setCsvError] = useState("");
-  const [showAdd, setShowAdd]   = useState(false);
-  const [form, setForm]         = useState({ name:"", email:"", dept:"", role:"", capacity:"40" });
-  const fileRef                 = useRef();
+/* ── EMPLOYEES (Admin only) ─────────────────────────────────── */
+function Employees({ user, employees, setEmployees, allocs, teams }) {
+  const [showInvite,  setShowInvite]  = useState(false);
+  const [showEdit,    setShowEdit]    = useState(false);
+  const [editTarget,  setEditTarget]  = useState(null);
+  const [delTarget,   setDelTarget]   = useState(null);
+  const [loading,     setLoading]     = useState(false);
+  const [err,         setErr]         = useState("");
+  const [ok,          setOk]          = useState("");
+  const [search,      setSearch]      = useState("");
+  const [filterDept,  setFilterDept]  = useState("");
 
-  const handleFile = file => {
-    setCsvError("");
-    if (!file || !file.name.endsWith(".csv")) { setCsvError("Please upload a .csv file."); return; }
-    const reader = new FileReader();
-    reader.onload = e => {
-      try {
-        const rows = parseCSV(e.target.result);
-        if (rows.length === 0) { setCsvError("No rows found. Check your file."); return; }
-        setPreview(rows.map((r,i) => rowToEmployee(r,i)));
-      } catch(err) {
-        setCsvError("Parse error: "+err.message);
-      }
-    };
-    reader.readAsText(file);
-  };
-
-  const confirmImport = () => {
-    setEmployees(prev => {
-      const existingEmails = new Set(prev.map(e=>e.email.toLowerCase()));
-      const fresh = preview.filter(p => !existingEmails.has((p.email||"").toLowerCase()));
-      return [...prev, ...fresh];
-    });
-    setPreview(null);
-    setTab("list");
-  };
-
-  const addOne = () => {
-    if (!form.name) return;
-    setEmployees(prev => [...prev, rowToEmployee({ ...form, weekly_capacity:form.capacity }, prev.length)]);
-    setForm({ name:"", email:"", dept:"", role:"", capacity:"40" });
-    setShowAdd(false);
-  };
+  const blank = { name:"",email:"",role:"user",department:"",jobTitle:"",capacity:"40",teamId:"",phone:"" };
+  const [form, setForm] = useState(blank);
+  const f = k => e => setForm(p=>({...p,[k]:e.target.value}));
 
   const depts = [...new Set(employees.map(e=>e.dept))].filter(Boolean);
 
+  const filtered = employees.filter(e=>{
+    const q=search.toLowerCase();
+    return (!q||(e.name||"").toLowerCase().includes(q)||(e.email||"").toLowerCase().includes(q))
+      && (!filterDept||e.dept===filterDept);
+  });
+
+  const sendInvite = async () => {
+    if (!form.name||!form.email) { setErr("Name and email are required."); return; }
+    setLoading(true); setErr(""); setOk("");
+    try {
+      const res = await fetch("/api/invite", {
+        method:"POST",
+        headers:{ "Content-Type":"application/json" },
+        body:JSON.stringify({
+          name:form.name, email:form.email, role:form.role,
+          department:form.department, jobTitle:form.jobTitle,
+          capacity:+form.capacity||40, teamId:form.teamId||null, phone:form.phone,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error||"Invite failed");
+      const newEmp = {
+        id:data.employeeId||Date.now(), name:form.name, email:form.email,
+        dept:form.department, role:form.jobTitle, capacity:+form.capacity||40,
+        active:true, teamId:form.teamId||null,
+        color:AVA_COLORS[employees.length%AVA_COLORS.length],
+        init:form.name.split(" ").map(p=>p[0]).join("").slice(0,2).toUpperCase(),
+      };
+      setEmployees(prev=>[...prev,newEmp]);
+      setOk("Invite sent to "+form.email);
+      setForm(blank);
+      setShowInvite(false);
+    } catch(e) { setErr(e.message); }
+    finally { setLoading(false); }
+  };
+
+  const saveEdit = async () => {
+    if (!editTarget) return;
+    const { error } = await sb.from("employees").update({
+      name:form.name, department:form.department, role:form.jobTitle,
+      capacity:+form.capacity||40, active:form.active!=="false", phone:form.phone,
+    }).eq("id",editTarget.id);
+    if (error) { setErr(error.message); return; }
+    setEmployees(prev=>prev.map(e=>e.id===editTarget.id?{...e,
+      name:form.name,dept:form.department,role:form.jobTitle,
+      capacity:+form.capacity||40,active:form.active!=="false",phone:form.phone,
+    }:e));
+    setShowEdit(false); setEditTarget(null); setOk("Employee updated.");
+  };
+
+  const toggleActive = async (emp) => {
+    const { error } = await sb.from("employees").update({ active:!emp.active }).eq("id",emp.id);
+    if (!error) setEmployees(prev=>prev.map(e=>e.id===emp.id?{...e,active:!e.active}:e));
+  };
+
+  const deleteEmp = async (emp) => {
+    const { error } = await sb.from("employees").delete().eq("id",emp.id);
+    if (!error) { setEmployees(prev=>prev.filter(e=>e.id!==emp.id)); setDelTarget(null); }
+    else setErr(error.message);
+  };
+
+  const openEdit = emp => {
+    setForm({ name:emp.name,email:emp.email,role:emp.appRole||"user",department:emp.dept,
+      jobTitle:emp.role,capacity:String(emp.capacity),teamId:emp.teamId||"",
+      phone:emp.phone||"",active:String(emp.active) });
+    setEditTarget(emp); setShowEdit(true);
+  };
+
   return (
     <div>
-      <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:18 }}>
+      <div style={{ display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:18 }}>
         <div>
-          <h1 style={{ fontSize:22, fontWeight:800, color:TEXT, margin:"0 0 3px" }}>Employees</h1>
-          <p style={{ color:MUTED, fontSize:13, margin:0 }}>{employees.filter(e=>e.active).length} active across {depts.length} departments</p>
+          <h1 style={{ fontSize:22,fontWeight:800,color:TEXT,margin:"0 0 3px" }}>Employees</h1>
+          <p style={{ color:MUTED,fontSize:13,margin:0 }}>{employees.filter(e=>e.active).length} active / {employees.length} total</p>
         </div>
-        <div style={{ display:"flex", gap:8 }}>
-          <Btn onClick={()=>setTab(tab==="upload"?"list":"upload")}>
-            {tab==="upload" ? "Back to List" : "Upload CSV"}
-          </Btn>
-          <Btn primary onClick={()=>setShowAdd(v=>!v)}>+ Add Employee</Btn>
-        </div>
+        <Btn primary onClick={()=>{setForm(blank);setErr("");setOk("");setShowInvite(true);}}>+ Invite Employee</Btn>
       </div>
 
-      {/* Add single employee */}
-      {showAdd && (
-        <Card style={{ marginBottom:14, border:"1px solid #06D6A033", background:"#F0FDF9" }}>
-          <div style={{ fontSize:14, fontWeight:700, marginBottom:12 }}>Add Employee</div>
-          <div style={{ display:"grid", gridTemplateColumns:"repeat(5,1fr)", gap:10, marginBottom:12 }}>
-            {[["Full Name","name","text"],["Email","email","email"],["Department","dept","text"],["Role / Title","role","text"],["Weekly Hours","capacity","number"]].map(([lbl,k,t])=>(
-              <div key={k}>
-                <label style={{ fontSize:11, color:MUTED, display:"block", marginBottom:4 }}>{lbl}</label>
-                <input type={t} value={form[k]} onChange={e=>setForm(f=>({...f,[k]:e.target.value}))}
-                  style={{ width:"100%", padding:"7px 10px", border:"1px solid "+BORDER, borderRadius:6, fontSize:13, boxSizing:"border-box" }} />
-              </div>
-            ))}
-          </div>
-          <div style={{ display:"flex", gap:8 }}>
-            <Btn primary small onClick={addOne}>Add</Btn>
-            <Btn small onClick={()=>setShowAdd(false)}>Cancel</Btn>
-          </div>
-        </Card>
-      )}
+      {ok && <div style={{ padding:"10px 14px",background:"#F0FDF9",border:"1px solid #6EE7B7",borderRadius:8,fontSize:13,color:"#065F46",marginBottom:14 }}>{ok}</div>}
 
-      {/* CSV Upload */}
-      {tab === "upload" && (
-        <div>
-          <Card style={{ marginBottom:14 }}>
-            <div style={{ fontSize:14, fontWeight:700, marginBottom:4 }}>Upload Employee CSV</div>
-            <div style={{ fontSize:13, color:MUTED, marginBottom:16 }}>
-              Expected columns: <code style={{ background:"#F1F5F9", padding:"1px 6px", borderRadius:4 }}>Name, Email, Department, Role, Weekly_Capacity</code>
-            </div>
+      {/* Search + filter */}
+      <div style={{ display:"flex",gap:10,marginBottom:14 }}>
+        <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search employees..."
+          style={{ flex:1,padding:"8px 14px",border:"1px solid "+BORDER,borderRadius:8,fontSize:13 }}/>
+        <select value={filterDept} onChange={e=>setFilterDept(e.target.value)}
+          style={{ padding:"8px 14px",border:"1px solid "+BORDER,borderRadius:8,fontSize:13,minWidth:160 }}>
+          <option value="">All Departments</option>
+          {depts.map(d=><option key={d} value={d}>{d}</option>)}
+        </select>
+      </div>
 
-            <div
-              onDragOver={e=>{e.preventDefault();setDragOver(true);}}
-              onDragLeave={()=>setDragOver(false)}
-              onDrop={e=>{e.preventDefault();setDragOver(false);const f=e.dataTransfer.files[0];if(f)handleFile(f);}}
-              onClick={()=>fileRef.current?.click()}
-              style={{ border:"2px dashed "+(dragOver?TEAL:"#CBD5E1"), borderRadius:10, padding:"36px 20px",
-                textAlign:"center", cursor:"pointer", background:dragOver?"#F0FDF9":BG, transition:"all .2s" }}>
-              <div style={{ fontSize:32, marginBottom:8 }}>📂</div>
-              <div style={{ fontSize:14, fontWeight:600, color:dragOver?TEAL:TEXT }}>Drop your CSV here or click to browse</div>
-              <div style={{ fontSize:12, color:MUTED, marginTop:4 }}>.csv files only</div>
-              <input ref={fileRef} type="file" accept=".csv" style={{ display:"none" }}
-                onChange={e=>{if(e.target.files[0])handleFile(e.target.files[0]);}} />
-            </div>
-
-            {csvError && (
-              <div style={{ marginTop:12, padding:"10px 14px", background:"#FEF2F2", border:"1px solid #FCA5A5", borderRadius:8, fontSize:13, color:"#DC2626" }}>{csvError}</div>
-            )}
-
-            <div style={{ marginTop:16, padding:"12px 14px", background:"#F8FAFC", borderRadius:8, border:"1px solid "+BORDER }}>
-              <div style={{ fontSize:12, fontWeight:700, color:MUTED, marginBottom:8 }}>Sample CSV format</div>
-              <pre style={{ fontSize:12, color:"#475569", margin:0, fontFamily:"monospace" }}>{`Name,Email,Department,Role,Weekly_Capacity
-John Smith,john@company.com,Engineering,Developer,40
-Jane Doe,jane@company.com,Design,Designer,40
-Bob Jones,bob@company.com,QA,QA Engineer,32`}</pre>
-            </div>
-          </Card>
-
-          {/* Preview */}
-          {preview && (
-            <Card>
-              <SecHd title={"Preview  -  "+preview.length+" employees found"}
-                action={<div style={{display:"flex",gap:8}}>
-                  <Btn small onClick={()=>setPreview(null)}>Cancel</Btn>
-                  <Btn primary small onClick={confirmImport}>Import All</Btn>
-                </div>} />
-              <div style={{ overflowX:"auto" }}>
-                <table style={{ width:"100%", borderCollapse:"collapse", fontSize:13 }}>
-                  <thead>
-                    <tr style={{ background:"#F8FAFC" }}>
-                      {["Name","Email","Department","Role","Capacity"].map(h=>(
-                        <th key={h} style={{ padding:"8px 12px", textAlign:"left", fontWeight:600, color:MUTED, borderBottom:"1px solid "+BORDER }}>{h}</th>
-                      ))}
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {preview.map((e,i)=>(
-                      <tr key={i} style={{ borderBottom:"1px solid #F1F5F9" }}>
-                        <td style={{ padding:"8px 12px" }}>
-                          <div style={{ display:"flex", alignItems:"center", gap:8 }}>
-                            <Av name={e.name} color={e.color} sz={26} />
-                            <span style={{ fontWeight:500 }}>{e.name}</span>
-                          </div>
-                        </td>
-                        <td style={{ padding:"8px 12px", color:MUTED }}>{e.email}</td>
-                        <td style={{ padding:"8px 12px" }}>{e.dept}</td>
-                        <td style={{ padding:"8px 12px" }}>{e.role}</td>
-                        <td style={{ padding:"8px 12px" }}>{e.capacity}h/wk</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            </Card>
-          )}
-        </div>
-      )}
-
-      {/* Employee list */}
-      {tab === "list" && (
-        <Card>
-          <table style={{ width:"100%", borderCollapse:"collapse", fontSize:13 }}>
-            <thead>
-              <tr style={{ background:"#F8FAFC" }}>
-                {["Employee","Department","Role","Capacity","Projects","Status"].map(h=>(
-                  <th key={h} style={{ padding:"8px 12px", textAlign:"left", fontWeight:600, color:MUTED, borderBottom:"1px solid "+BORDER }}>{h}</th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {employees.map(e=>{
-                const projCount = allocs.filter(a=>a.empId===e.id).length;
-                return (
-                  <tr key={e.id} style={{ borderBottom:"1px solid #F1F5F9", opacity:e.active?1:0.5 }}>
-                    <td style={{ padding:"10px 12px" }}>
-                      <div style={{ display:"flex", alignItems:"center", gap:10 }}>
-                        <Av name={e.name} color={e.color} sz={32} />
-                        <div>
-                          <div style={{ fontWeight:600 }}>{e.name}</div>
-                          <div style={{ fontSize:11, color:MUTED }}>{e.email}</div>
-                        </div>
+      <Card style={{ padding:0,overflow:"hidden" }}>
+        <table style={{ width:"100%",borderCollapse:"collapse",fontSize:13 }}>
+          <thead>
+            <tr style={{ background:"#F8FAFC" }}>
+              {["Employee","Department","Job Title","Capacity","Team","Role","Status","Actions"].map(h=>(
+                <th key={h} style={{ padding:"10px 14px",textAlign:"left",fontWeight:600,color:MUTED,borderBottom:"1px solid "+BORDER }}>{h}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {filtered.map(e=>{
+              const team=teams.find(t=>t.id===e.teamId);
+              return (
+                <tr key={e.id} style={{ borderBottom:"1px solid #F1F5F9",opacity:e.active?1:0.55 }}>
+                  <td style={{ padding:"10px 14px" }}>
+                    <div style={{ display:"flex",alignItems:"center",gap:10 }}>
+                      <Av name={e.name} color={e.color||TEAL} sz={32}/>
+                      <div>
+                        <div style={{ fontWeight:600,color:TEXT }}>{e.name}</div>
+                        <div style={{ fontSize:11,color:MUTED }}>{e.email}</div>
                       </div>
-                    </td>
-                    <td style={{ padding:"10px 12px" }}>
-                      <span style={{ background:e.color+"22", color:e.color, borderRadius:6, padding:"2px 8px", fontSize:11, fontWeight:600 }}>{e.dept}</span>
-                    </td>
-                    <td style={{ padding:"10px 12px", color:MUTED }}>{e.role}</td>
-                    <td style={{ padding:"10px 12px", fontWeight:600 }}>{e.capacity}h / wk</td>
-                    <td style={{ padding:"10px 12px", color:MUTED }}>{projCount} project{projCount!==1?"s":""}</td>
-                    <td style={{ padding:"10px 12px" }}>
-                      <span style={{ background:e.active?"#D1FAE5":"#F3F4F6", color:e.active?"#065F46":"#6B7280",
-                        borderRadius:6, padding:"2px 8px", fontSize:11, fontWeight:600 }}>
-                        {e.active?"Active":"Inactive"}
-                      </span>
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        </Card>
+                    </div>
+                  </td>
+                  <td style={{ padding:"10px 14px" }}>
+                    <span style={{ background:(e.color||TEAL)+"22",color:e.color||TEAL,borderRadius:6,padding:"2px 8px",fontSize:11,fontWeight:600 }}>{e.dept||"-"}</span>
+                  </td>
+                  <td style={{ padding:"10px 14px",color:MUTED }}>{e.role||"-"}</td>
+                  <td style={{ padding:"10px 14px",fontWeight:600 }}>{e.capacity}h/wk</td>
+                  <td style={{ padding:"10px 14px",color:MUTED }}>{team?.name||"-"}</td>
+                  <td style={{ padding:"10px 14px" }}><RoleBadge role={e.appRole||"user"}/></td>
+                  <td style={{ padding:"10px 14px" }}><Badge s={e.active?"active":"inactive"}/></td>
+                  <td style={{ padding:"10px 14px" }}>
+                    <div style={{ display:"flex",gap:6 }}>
+                      <Btn small onClick={()=>openEdit(e)}>Edit</Btn>
+                      <Btn small onClick={()=>toggleActive(e)} style={{ background:e.active?"#FEF3C7":"#F0FDF9",color:e.active?"#92400E":"#065F46",border:"none" }}>
+                        {e.active?"Deactivate":"Activate"}
+                      </Btn>
+                      <Btn small danger onClick={()=>setDelTarget(e)}>Delete</Btn>
+                    </div>
+                  </td>
+                </tr>
+              );
+            })}
+            {filtered.length===0&&(
+              <tr><td colSpan={8} style={{ padding:"32px",textAlign:"center",color:MUTED }}>No employees found.</td></tr>
+            )}
+          </tbody>
+        </table>
+      </Card>
+
+      {/* Invite modal */}
+      {showInvite && (
+        <Modal title="Invite New Employee" onClose={()=>setShowInvite(false)} width={540}>
+          {err&&<div style={{ padding:"10px 14px",background:"#FEF2F2",border:"1px solid #FCA5A5",borderRadius:8,fontSize:13,color:"#DC2626",marginBottom:14 }}>{err}</div>}
+          <div style={{ display:"grid",gridTemplateColumns:"1fr 1fr",gap:0 }}>
+            <div style={{ paddingRight:12 }}>
+              <Input label="Full Name"    value={form.name}       onChange={f("name")}       required placeholder="John Smith"/>
+              <Input label="Work Email"   type="email" value={form.email} onChange={f("email")} required placeholder="john@company.com"/>
+              <Input label="Phone"        value={form.phone}      onChange={f("phone")}      placeholder="+1 555 000 0000"/>
+              <Input label="Weekly Capacity (hours)" type="number" value={form.capacity} onChange={f("capacity")} placeholder="40"/>
+            </div>
+            <div style={{ paddingLeft:12 }}>
+              <Input label="Department"   value={form.department} onChange={f("department")} placeholder="Engineering"/>
+              <Input label="Job Title"    value={form.jobTitle}   onChange={f("jobTitle")}   placeholder="Senior Developer"/>
+              <Sel label="Role" value={form.role} onChange={f("role")} options={[
+                {value:"user",label:"User"},
+                {value:"manager",label:"Manager"},
+                {value:"admin",label:"Admin"},
+              ]}/>
+              <Sel label="Assign to Team" value={form.teamId} onChange={f("teamId")} options={[
+                {value:"",label:"No team yet"},
+                ...teams.map(t=>({value:t.id,label:t.name})),
+              ]}/>
+            </div>
+          </div>
+          <div style={{ display:"flex",gap:10,marginTop:8,paddingTop:16,borderTop:"1px solid "+BORDER }}>
+            <Btn primary full disabled={loading} onClick={sendInvite}>
+              {loading?<><Spinner/>Sending invite...</>:"Send Invite Email"}
+            </Btn>
+            <Btn full onClick={()=>setShowInvite(false)}>Cancel</Btn>
+          </div>
+          <div style={{ marginTop:14,fontSize:12,color:MUTED,background:"#F8FAFC",borderRadius:8,padding:"10px 12px" }}>
+            An email will be sent to the employee with a link to set their password and access ResTrack.
+          </div>
+        </Modal>
+      )}
+
+      {/* Edit modal */}
+      {showEdit && editTarget && (
+        <Modal title={"Edit - "+editTarget.name} onClose={()=>{setShowEdit(false);setEditTarget(null);}}>
+          {err&&<div style={{ padding:"10px 14px",background:"#FEF2F2",border:"1px solid #FCA5A5",borderRadius:8,fontSize:13,color:"#DC2626",marginBottom:14 }}>{err}</div>}
+          <Input label="Full Name"   value={form.name}       onChange={f("name")}       required/>
+          <Input label="Department"  value={form.department} onChange={f("department")} />
+          <Input label="Job Title"   value={form.jobTitle}   onChange={f("jobTitle")}   />
+          <Input label="Phone"       value={form.phone}      onChange={f("phone")}      />
+          <Input label="Weekly Capacity" type="number" value={form.capacity} onChange={f("capacity")}/>
+          <Sel label="Status" value={form.active} onChange={f("active")} options={[{value:"true",label:"Active"},{value:"false",label:"Inactive"}]}/>
+          <div style={{ display:"flex",gap:10,marginTop:8 }}>
+            <Btn primary full onClick={saveEdit}>Save Changes</Btn>
+            <Btn full onClick={()=>{setShowEdit(false);setEditTarget(null);}}>Cancel</Btn>
+          </div>
+        </Modal>
+      )}
+
+      {/* Delete confirm */}
+      {delTarget && (
+        <Modal title="Delete Employee" onClose={()=>setDelTarget(null)} width={400}>
+          <p style={{ fontSize:14,color:TEXT,marginBottom:20 }}>
+            Are you sure you want to permanently delete <strong>{delTarget.name}</strong>? This cannot be undone.
+          </p>
+          <div style={{ display:"flex",gap:10 }}>
+            <Btn danger full onClick={()=>deleteEmp(delTarget)}>Yes, Delete</Btn>
+            <Btn full onClick={()=>setDelTarget(null)}>Cancel</Btn>
+          </div>
+        </Modal>
       )}
     </div>
   );
 }
 
-/* ─── PROJECTS ───────────────────────────────────────────────── */
-function Projects({ projects, setProjects, allocs, setAllocs, employees }) {
-  const [showNew, setShowNew]   = useState(false);
-  const [selected, setSelected] = useState(null);
-  const [form, setForm]         = useState({ name:"", client:"", status:"planning", start:"", end:"" });
-  const [allocForm, setAllocForm] = useState({ empId:"", hoursPerWeek:"" });
+/* ── TEAMS ──────────────────────────────────────────────────── */
+function Teams({ user, teams, setTeams, employees, setEmployees }) {
+  const isAdmin   = user.role==="admin";
+  const [showNew, setShowNew] = useState(false);
+  const [selTeam, setSelTeam] = useState(null);
+  const [form,    setForm]    = useState({ name:"",description:"",managerId:"",color:TEAL });
+  const [loading, setLoading] = useState(false);
 
-  const addProj = () => {
+  const visibleTeams = isAdmin ? teams : teams.filter(t=>t.managerId===user.employeeId);
+
+  const createTeam = async () => {
     if (!form.name) return;
-    const p = { id:Date.now(), ...form };
-    setProjects(prev=>[...prev, p]);
+    setLoading(true);
+    const { data,error } = await sb.from("teams").insert({
+      name:form.name, description:form.description,
+      manager_id:form.managerId||null, color:form.color,
+    }).select().single();
+    setLoading(false);
+    if (error) { alert(error.message); return; }
+    const newTeam = { id:data.id,name:data.name,description:data.description,
+      managerId:data.manager_id,color:data.color,members:[] };
+    setTeams(prev=>[...prev,newTeam]);
+    setForm({ name:"",description:"",managerId:"",color:TEAL });
     setShowNew(false);
-    setForm({ name:"", client:"", status:"planning", start:"", end:"" });
   };
 
-  const addAlloc = (projId) => {
-    if (!allocForm.empId || !allocForm.hoursPerWeek) return;
-    const existing = allocs.find(a=>a.empId===+allocForm.empId&&a.projId===projId);
-    if (existing) {
-      setAllocs(prev=>prev.map(a=>a.id===existing.id?{...a,hoursPerWeek:+allocForm.hoursPerWeek}:a));
-    } else {
-      setAllocs(prev=>[...prev,{id:Date.now(),empId:+allocForm.empId,projId,hoursPerWeek:+allocForm.hoursPerWeek}]);
+  const addMember = async (teamId, empId) => {
+    const { error } = await sb.from("team_members")
+      .upsert({ team_id:teamId,employee_id:empId },{ onConflict:"team_id,employee_id" });
+    if (!error) {
+      setTeams(prev=>prev.map(t=>t.id===teamId?{...t,members:[...t.members,empId]}:t));
+      setEmployees(prev=>prev.map(e=>e.id===empId?{...e,teamId}:e));
     }
-    setAllocForm({ empId:"", hoursPerWeek:"" });
   };
 
-  const removeAlloc = (id) => setAllocs(prev=>prev.filter(a=>a.id!==id));
+  const removeMember = async (teamId, empId) => {
+    const { error } = await sb.from("team_members")
+      .delete().eq("team_id",teamId).eq("employee_id",empId);
+    if (!error) setTeams(prev=>prev.map(t=>t.id===teamId?{...t,members:t.members.filter(m=>m!==empId)}:t));
+  };
+
+  const TEAM_COLORS = [TEAL,"#8B5CF6","#3B82F6","#F59E0B","#EF4444","#10B981","#EC4899"];
 
   return (
     <div>
-      <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:18 }}>
+      <div style={{ display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:18 }}>
         <div>
-          <h1 style={{ fontSize:22, fontWeight:800, color:TEXT, margin:"0 0 3px" }}>Projects</h1>
-          <p style={{ color:MUTED, fontSize:13, margin:0 }}>{projects.length} projects  -  manage teams and allocations</p>
+          <h1 style={{ fontSize:22,fontWeight:800,color:TEXT,margin:"0 0 3px" }}>Teams</h1>
+          <p style={{ color:MUTED,fontSize:13,margin:0 }}>{visibleTeams.length} teams</p>
         </div>
-        <Btn primary onClick={()=>setShowNew(v=>!v)}>+ New Project</Btn>
+        {isAdmin&&<Btn primary onClick={()=>setShowNew(v=>!v)}>+ Create Team</Btn>}
       </div>
 
       {showNew && (
-        <Card style={{ marginBottom:14, border:"1px solid #06D6A033", background:"#F0FDF9" }}>
-          <div style={{ fontSize:14, fontWeight:700, marginBottom:12 }}>Create Project</div>
-          <div style={{ display:"grid", gridTemplateColumns:"2fr 1fr 1fr 1fr 1fr", gap:10, marginBottom:12 }}>
-            {[["Project Name","name","text"],["Client","client","text"],["Start Date","start","date"],["End Date","end","date"]].map(([lbl,k,t])=>(
-              <div key={k}>
-                <label style={{ fontSize:11, color:MUTED, display:"block", marginBottom:4 }}>{lbl}</label>
-                <input type={t} value={form[k]} onChange={e=>setForm(f=>({...f,[k]:e.target.value}))}
-                  style={{ width:"100%", padding:"7px 10px", border:"1px solid "+BORDER, borderRadius:6, fontSize:13, boxSizing:"border-box" }} />
+        <Card style={{ marginBottom:14,border:"1px solid #06D6A033",background:"#F0FDF9" }}>
+          <div style={{ fontSize:14,fontWeight:700,marginBottom:14 }}>New Team</div>
+          <div style={{ display:"grid",gridTemplateColumns:"1fr 1fr",gap:0 }}>
+            <div style={{ paddingRight:12 }}>
+              <Input label="Team Name" value={form.name} onChange={e=>setForm(f=>({...f,name:e.target.value}))} placeholder="Frontend Squad" required/>
+              <Input label="Description" value={form.description} onChange={e=>setForm(f=>({...f,description:e.target.value}))} placeholder="Optional"/>
+            </div>
+            <div style={{ paddingLeft:12 }}>
+              <Sel label="Team Manager" value={form.managerId} onChange={e=>setForm(f=>({...f,managerId:e.target.value}))} options={[
+                {value:"",label:"No manager yet"},
+                ...employees.filter(e=>e.active).map(e=>({value:e.id,label:e.name}))
+              ]}/>
+              <div style={{ marginBottom:14 }}>
+                <label style={{ fontSize:12,fontWeight:600,color:TEXT,display:"block",marginBottom:8 }}>Team Color</label>
+                <div style={{ display:"flex",gap:8 }}>
+                  {TEAM_COLORS.map(c=>(
+                    <div key={c} onClick={()=>setForm(f=>({...f,color:c}))}
+                      style={{ width:28,height:28,borderRadius:"50%",background:c,cursor:"pointer",
+                        border:form.color===c?"3px solid "+TEXT:"3px solid transparent",transition:"border .15s" }}/>
+                  ))}
+                </div>
               </div>
-            ))}
-            <div>
-              <label style={{ fontSize:11, color:MUTED, display:"block", marginBottom:4 }}>Status</label>
-              <select value={form.status} onChange={e=>setForm(f=>({...f,status:e.target.value}))}
-                style={{ width:"100%", padding:"7px 10px", border:"1px solid "+BORDER, borderRadius:6, fontSize:13 }}>
-                {["planning","active","review","completed"].map(s=><option key={s} value={s}>{s}</option>)}
-              </select>
             </div>
           </div>
-          <div style={{ display:"flex", gap:8 }}>
-            <Btn primary small onClick={addProj}>Create</Btn>
+          <div style={{ display:"flex",gap:8 }}>
+            <Btn primary small disabled={loading} onClick={createTeam}>{loading?<Spinner/>:"Create Team"}</Btn>
             <Btn small onClick={()=>setShowNew(false)}>Cancel</Btn>
           </div>
         </Card>
       )}
 
-      <div style={{ display:"flex", flexDirection:"column", gap:10 }}>
-        {projects.map(p => {
-          const pAllocs = allocs.filter(a=>a.projId===p.id);
-          const isOpen  = selected===p.id;
-          const totalAllocHrs = pAllocs.reduce((s,a)=>s+a.hoursPerWeek,0);
-          const unassigned = employees.filter(e=>e.active && !pAllocs.find(a=>a.empId===e.id));
-
+      <div style={{ display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(340px,1fr))",gap:12 }}>
+        {visibleTeams.map(t=>{
+          const members  = employees.filter(e=>t.members?.includes(e.id));
+          const manager  = employees.find(e=>e.id===t.managerId);
+          const isOpen   = selTeam===t.id;
+          const unassigned = employees.filter(e=>e.active&&!t.members?.includes(e.id));
           return (
-            <Card key={p.id} style={{ padding:0, overflow:"hidden" }}>
-              <div style={{ padding:"14px 18px", cursor:"pointer" }} onClick={()=>setSelected(isOpen?null:p.id)}>
-                <div style={{ display:"flex", alignItems:"center", gap:12 }}>
-                  <div style={{ flex:1 }}>
-                    <div style={{ display:"flex", alignItems:"center", gap:8, marginBottom:4, flexWrap:"wrap" }}>
-                      <span style={{ fontSize:14, fontWeight:700, color:TEXT }}>{p.name}</span>
-                      <Badge s={p.status} />
-                      <span style={{ fontSize:12, color:MUTED }}>{p.client}</span>
-                    </div>
-                    <div style={{ display:"flex", gap:16, fontSize:12, color:MUTED }}>
-                      <span>{pAllocs.length} team members</span>
-                      <span>{totalAllocHrs}h allocated/week</span>
-                      {p.start && <span>{p.start} to {p.end}</span>}
-                    </div>
-                  </div>
-                  <div style={{ display:"flex", gap:-6 }}>
-                    {pAllocs.slice(0,5).map(a=>{
-                      const emp = employees.find(e=>e.id===a.empId);
-                      return emp ? <Av key={a.id} name={emp.name} color={emp.color} sz={28} /> : null;
-                    })}
-                    {pAllocs.length>5 && <div style={{ width:28,height:28,borderRadius:"50%",background:"#F1F5F9",display:"flex",alignItems:"center",justifyContent:"center",fontSize:10,fontWeight:700,color:MUTED }}>+{pAllocs.length-5}</div>}
-                  </div>
-                  <span style={{ color:"#CBD5E1", fontSize:12, marginLeft:8 }}>{isOpen?"▲":"▼"}</span>
+            <Card key={t.id} style={{ border:"1px solid "+BORDER }}>
+              <div style={{ display:"flex",alignItems:"center",gap:10,marginBottom:12 }}>
+                <div style={{ width:40,height:40,borderRadius:10,background:t.color+"22",display:"flex",alignItems:"center",
+                  justifyContent:"center",fontSize:18 }}>🏢</div>
+                <div style={{ flex:1 }}>
+                  <div style={{ fontSize:15,fontWeight:700,color:TEXT }}>{t.name}</div>
+                  {t.description&&<div style={{ fontSize:12,color:MUTED }}>{t.description}</div>}
                 </div>
+                <button onClick={()=>setSelTeam(isOpen?null:t.id)}
+                  style={{ background:"none",border:"none",cursor:"pointer",fontSize:13,color:MUTED }}>
+                  {isOpen?"▲":"▼"}
+                </button>
               </div>
 
-              {isOpen && (
-                <div style={{ borderTop:"1px solid #F1F5F9", background:"#FAFBFC", padding:"14px 18px" }}>
-                  <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:16 }}>
-                    <div>
-                      <div style={{ fontSize:12, fontWeight:700, color:MUTED, marginBottom:10, textTransform:"uppercase", letterSpacing:0.5 }}>Team Allocations</div>
-                      {pAllocs.length===0 && <div style={{ color:"#94A3B8", fontSize:13 }}>No team members allocated yet.</div>}
-                      {pAllocs.map(a=>{
-                        const emp=employees.find(e=>e.id===a.empId);
-                        if (!emp) return null;
-                        const pct=emp.capacity>0?Math.round((a.hoursPerWeek/emp.capacity)*100):0;
-                        return (
-                          <div key={a.id} style={{ display:"flex", alignItems:"center", gap:10, padding:"8px 0", borderBottom:"1px solid #F1F5F9" }}>
-                            <Av name={emp.name} color={emp.color} sz={28} />
-                            <div style={{ flex:1 }}>
-                              <div style={{ fontSize:13, fontWeight:500 }}>{emp.name}</div>
-                              <div style={{ fontSize:11, color:MUTED }}>{emp.role}</div>
-                            </div>
-                            <div style={{ fontSize:13, fontWeight:600, color:TEXT }}>{a.hoursPerWeek}h/wk</div>
-                            <div style={{ fontSize:11, background:"#EFF6FF", color:"#1D4ED8", padding:"2px 7px", borderRadius:6 }}>{pct}% of capacity</div>
-                            <button onClick={()=>removeAlloc(a.id)} style={{ border:"none",background:"none",color:"#94A3B8",cursor:"pointer",fontSize:16 }}>x</button>
-                          </div>
-                        );
-                      })}
-                    </div>
-                    <div>
-                      <div style={{ fontSize:12, fontWeight:700, color:MUTED, marginBottom:10, textTransform:"uppercase", letterSpacing:0.5 }}>Add Team Member</div>
-                      <div style={{ display:"flex", flexDirection:"column", gap:10 }}>
-                        <div>
-                          <label style={{ fontSize:11, color:MUTED, display:"block", marginBottom:4 }}>Employee</label>
-                          <select value={allocForm.empId} onChange={e=>setAllocForm(f=>({...f,empId:e.target.value}))}
-                            style={{ width:"100%", padding:"7px 10px", border:"1px solid "+BORDER, borderRadius:6, fontSize:13 }}>
-                            <option value="">Select employee...</option>
-                            {unassigned.map(e=><option key={e.id} value={e.id}>{e.name} ({e.capacity}h capacity)</option>)}
-                          </select>
-                        </div>
-                        <div>
-                          <label style={{ fontSize:11, color:MUTED, display:"block", marginBottom:4 }}>Hours per week</label>
-                          <input type="number" min="1" max="80" value={allocForm.hoursPerWeek}
-                            onChange={e=>setAllocForm(f=>({...f,hoursPerWeek:e.target.value}))}
-                            style={{ width:"100%", padding:"7px 10px", border:"1px solid "+BORDER, borderRadius:6, fontSize:13, boxSizing:"border-box" }} />
-                        </div>
-                        <Btn primary small onClick={()=>addAlloc(p.id)}>Add to Project</Btn>
-                      </div>
-                    </div>
+              {manager&&(
+                <div style={{ display:"flex",alignItems:"center",gap:8,padding:"8px 10px",background:"#F8FAFC",borderRadius:8,marginBottom:10 }}>
+                  <Av name={manager.name} color={manager.color||TEAL} sz={24}/>
+                  <div>
+                    <div style={{ fontSize:12,fontWeight:600,color:TEXT }}>{manager.name}</div>
+                    <div style={{ fontSize:11,color:MUTED }}>Team Manager</div>
                   </div>
+                </div>
+              )}
+
+              <div style={{ display:"flex",gap:-6,marginBottom:6 }}>
+                {members.slice(0,6).map(m=><Av key={m.id} name={m.name} color={m.color||TEAL} sz={28}/>)}
+                {members.length>6&&<div style={{ width:28,height:28,borderRadius:"50%",background:"#F1F5F9",display:"flex",alignItems:"center",justifyContent:"center",fontSize:10,fontWeight:700,color:MUTED }}>+{members.length-6}</div>}
+              </div>
+              <div style={{ fontSize:12,color:MUTED }}>{members.length} member{members.length!==1?"s":""}</div>
+
+              {isOpen&&isAdmin&&(
+                <div style={{ marginTop:14,borderTop:"1px solid "+BORDER,paddingTop:14 }}>
+                  <div style={{ fontSize:12,fontWeight:700,color:MUTED,marginBottom:8,textTransform:"uppercase",letterSpacing:0.5 }}>Members</div>
+                  {members.map(m=>(
+                    <div key={m.id} style={{ display:"flex",alignItems:"center",gap:8,marginBottom:7 }}>
+                      <Av name={m.name} color={m.color||TEAL} sz={24}/>
+                      <span style={{ flex:1,fontSize:13,fontWeight:500 }}>{m.name}</span>
+                      <button onClick={()=>removeMember(t.id,m.id)}
+                        style={{ border:"none",background:"#FEE2E2",color:"#991B1B",borderRadius:6,
+                          padding:"3px 8px",fontSize:11,cursor:"pointer",fontWeight:600 }}>Remove</button>
+                    </div>
+                  ))}
+                  {unassigned.length>0&&(
+                    <div style={{ marginTop:10 }}>
+                      <div style={{ fontSize:12,fontWeight:700,color:MUTED,marginBottom:6 }}>Add Member</div>
+                      <select defaultValue="" onChange={e=>{if(e.target.value)addMember(t.id,e.target.value);}}
+                        style={{ width:"100%",padding:"7px 10px",border:"1px solid "+BORDER,borderRadius:6,fontSize:13 }}>
+                        <option value="">Select employee to add...</option>
+                        {unassigned.map(e=><option key={e.id} value={e.id}>{e.name}</option>)}
+                      </select>
+                    </div>
+                  )}
                 </div>
               )}
             </Card>
           );
         })}
+        {visibleTeams.length===0&&(
+          <div style={{ gridColumn:"1/-1",textAlign:"center",padding:"60px 0",color:MUTED,fontSize:14 }}>
+            {isAdmin?"No teams yet. Create your first team above.":"You are not managing any teams yet."}
+          </div>
+        )}
       </div>
     </div>
   );
 }
 
-/* ─── UTILIZATION ────────────────────────────────────────────── */
-function Utilization({ employees, allocs, entries }) {
-  const [selWeek, setSelWeek] = useState(WEEKS[WEEKS.length-1]);
+/* ── PROFILE ────────────────────────────────────────────────── */
+function Profile({ user, setUser }) {
+  const [form,    setForm]    = useState({ name:user.name||"",phone:user.phone||"" });
+  const [pwdForm, setPwdForm] = useState({ current:"",newpwd:"",confirm:"" });
+  const [saving,  setSaving]  = useState(false);
+  const [pwdSaving,setPwdSaving]=useState(false);
+  const [msg,     setMsg]     = useState({ type:"",text:"" });
+  const [pwdMsg,  setPwdMsg]  = useState({ type:"",text:"" });
 
-  const weekStats = employees.filter(e=>e.active).map(e=>{
-    const logged    = empLoggedHours(e.id, selWeek, entries);
-    const allocated = empAllocatedHours(e.id, allocs);
-    const util      = e.capacity > 0 ? Math.round((logged/e.capacity)*100) : 0;
-    return { ...e, logged, allocated, util };
-  }).sort((a,b)=>b.util-a.util);
+  const saveProfile = async () => {
+    setSaving(true); setMsg({ type:"",text:"" });
+    const { error } = await sb.from("app_users").update({ name:form.name,phone:form.phone }).eq("id",user.id);
+    setSaving(false);
+    if (error) setMsg({ type:"error",text:error.message });
+    else { setUser(u=>({...u,name:form.name,phone:form.phone})); setMsg({ type:"ok",text:"Profile updated." }); }
+  };
 
-  /* heatmap: employees x weeks */
-  const heatRows = employees.filter(e=>e.active).map(e=>{
-    return {
-      emp: e,
-      cells: WEEKS.map(w=>({
-        week:w, pct:e.capacity>0?Math.round((empLoggedHours(e.id,w,entries)/e.capacity)*100):0
-      }))
-    };
-  });
+  const changePwd = async () => {
+    if (!pwdForm.newpwd||pwdForm.newpwd.length<8) { setPwdMsg({ type:"error",text:"Password must be at least 8 characters." }); return; }
+    if (pwdForm.newpwd!==pwdForm.confirm)          { setPwdMsg({ type:"error",text:"Passwords do not match." }); return; }
+    setPwdSaving(true); setPwdMsg({ type:"",text:"" });
+    const { error } = await sb.auth.updateUser({ password:pwdForm.newpwd });
+    setPwdSaving(false);
+    if (error) setPwdMsg({ type:"error",text:error.message });
+    else { setPwdMsg({ type:"ok",text:"Password changed successfully." }); setPwdForm({ current:"",newpwd:"",confirm:"" }); }
+  };
 
-  const barData = weekStats.map(e=>({ name:e.name.split(" ")[0], logged:e.logged, capacity:e.capacity, util:e.util }));
+  const msgBox = (m) => m.text?(
+    <div style={{ padding:"10px 14px",borderRadius:8,marginBottom:14,fontSize:13,
+      background:m.type==="error"?"#FEF2F2":"#F0FDF9",
+      color:m.type==="error"?"#DC2626":"#065F46",
+      border:"1px solid "+(m.type==="error"?"#FCA5A5":"#6EE7B7") }}>{m.text}</div>
+  ):null;
 
   return (
-    <div>
-      <div style={{ marginBottom:18 }}>
-        <h1 style={{ fontSize:22, fontWeight:800, color:TEXT, margin:"0 0 3px" }}>Utilization</h1>
-        <p style={{ color:MUTED, fontSize:13, margin:0 }}>Weekly resource utilization tracking and analysis</p>
+    <div style={{ maxWidth:700 }}>
+      <div style={{ marginBottom:20 }}>
+        <h1 style={{ fontSize:22,fontWeight:800,color:TEXT,margin:"0 0 3px" }}>My Profile</h1>
+        <p style={{ color:MUTED,fontSize:13,margin:0 }}>Manage your personal information and account settings</p>
       </div>
 
-      {/* Week selector */}
-      <div style={{ display:"flex", gap:6, marginBottom:18, flexWrap:"wrap" }}>
-        {WEEKS.map(w=>(
-          <button key={w} onClick={()=>setSelWeek(w)} style={{
-            padding:"6px 14px", borderRadius:8, border:"1px solid "+(selWeek===w?TEAL:BORDER),
-            background:selWeek===w?TEAL:WHITE, color:selWeek===w?"#fff":MUTED,
-            fontSize:12, fontWeight:600, cursor:"pointer" }}>{w.replace("2026-","")}</button>
-        ))}
-      </div>
-
-      <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:14, marginBottom:14 }}>
-        <Card>
-          <SecHd title={"Logged vs Capacity  -  "+selWeek.replace("2026-","")} />
-          <ResponsiveContainer width="100%" height={220}>
-            <BarChart data={barData}>
-              <CartesianGrid strokeDasharray="3 3" stroke="#F1F5F9" />
-              <XAxis dataKey="name" tick={{ fontSize:11, fill:"#94A3B8" }} />
-              <YAxis tick={{ fontSize:11, fill:"#94A3B8" }} unit="h" />
-              <Tooltip />
-              <Legend />
-              <Bar dataKey="capacity" name="Capacity" fill="#E2E8F0" radius={[3,3,0,0]} />
-              <Bar dataKey="logged"   name="Logged"   radius={[3,3,0,0]}>
-                {barData.map((d,i)=>{
-                  const clr = d.util>100?"#8B5CF6":d.util>=75?TEAL:d.util>=50?"#F59E0B":"#EF4444";
-                  return <Cell key={i} fill={clr} />;
-                })}
-              </Bar>
-            </BarChart>
-          </ResponsiveContainer>
-        </Card>
-
-        <Card>
-          <SecHd title="Utilization Summary" />
-          <div style={{ display:"flex", flexDirection:"column", gap:8 }}>
-            {weekStats.map(e=>{
-              const { bg, fg } = utilColor(e.util);
-              return (
-                <div key={e.id} style={{ display:"flex", alignItems:"center", gap:10 }}>
-                  <Av name={e.name} color={e.color} sz={28} />
-                  <div style={{ flex:1 }}>
-                    <div style={{ display:"flex", justifyContent:"space-between", marginBottom:3 }}>
-                      <span style={{ fontSize:13, fontWeight:500 }}>{e.name}</span>
-                      <span style={{ fontSize:12, color:MUTED }}>{e.logged}h / {e.capacity}h</span>
-                    </div>
-                    <Prog val={e.util} h={6} />
-                  </div>
-                  <span style={{ fontSize:12, fontWeight:700, background:bg, color:fg, borderRadius:6, padding:"2px 8px", minWidth:44, textAlign:"center" }}>{e.util}%</span>
-                </div>
-              );
-            })}
+      <Card style={{ marginBottom:16 }}>
+        <div style={{ display:"flex",alignItems:"center",gap:16,marginBottom:24,padding:"16px",background:"#F8FAFC",borderRadius:10 }}>
+          <div style={{ width:64,height:64,borderRadius:"50%",background:(user.avatarColor||TEAL)+"22",
+            color:user.avatarColor||TEAL,fontWeight:800,fontSize:24,display:"flex",alignItems:"center",
+            justifyContent:"center",border:"2px solid "+(user.avatarColor||TEAL)+"44" }}>
+            {(user.name||"?").split(" ").map(p=>p[0]).join("").slice(0,2).toUpperCase()}
           </div>
-        </Card>
-      </div>
+          <div>
+            <div style={{ fontSize:18,fontWeight:700,color:TEXT }}>{user.name}</div>
+            <div style={{ fontSize:13,color:MUTED }}>{user.email}</div>
+            <div style={{ marginTop:6,display:"flex",gap:8 }}>
+              <RoleBadge role={user.role}/>
+            </div>
+          </div>
+        </div>
 
-      {/* Heatmap */}
+        <div style={{ fontSize:15,fontWeight:700,marginBottom:16 }}>Personal Information</div>
+        {msgBox(msg)}
+        <div style={{ display:"grid",gridTemplateColumns:"1fr 1fr",gap:16 }}>
+          <Input label="Full Name" value={form.name} onChange={e=>setForm(f=>({...f,name:e.target.value}))} required/>
+          <Input label="Phone" value={form.phone} onChange={e=>setForm(f=>({...f,phone:e.target.value}))} placeholder="+1 555 000 0000"/>
+        </div>
+        <div style={{ display:"grid",gridTemplateColumns:"1fr 1fr",gap:16 }}>
+          <Input label="Email" value={user.email||""} disabled/>
+          <Input label="Role" value={user.role||""} disabled/>
+        </div>
+        <Btn primary disabled={saving} onClick={saveProfile}>
+          {saving?<><Spinner/>Saving...</>:"Save Changes"}
+        </Btn>
+      </Card>
+
       <Card>
-        <SecHd title="6-Week Utilization Heatmap" />
-        <div style={{ fontSize:11, color:MUTED, marginBottom:12, display:"flex", gap:16, flexWrap:"wrap" }}>
-          {[["No data","#F1F5F9","#94A3B8"],["Under 50%","#FEE2E2","#991B1B"],["50-75%","#FEF3C7","#92400E"],["75-100%","#D1FAE5","#065F46"],["Over 100%","#EDE9FE","#4C1D95"]].map(([lbl,bg,fg])=>(
-            <span key={lbl} style={{ display:"flex", alignItems:"center", gap:5 }}>
-              <span style={{ width:14, height:14, borderRadius:3, background:bg, border:"1px solid "+BORDER, display:"inline-block" }} />
-              <span style={{ color:fg, fontWeight:600 }}>{lbl}</span>
-            </span>
-          ))}
+        <div style={{ fontSize:15,fontWeight:700,marginBottom:16 }}>Change Password</div>
+        {msgBox(pwdMsg)}
+        <div style={{ display:"grid",gridTemplateColumns:"1fr 1fr",gap:16 }}>
+          <Input label="New Password" type="password" value={pwdForm.newpwd}
+            onChange={e=>setPwdForm(f=>({...f,newpwd:e.target.value}))} placeholder="At least 8 characters"/>
+          <Input label="Confirm Password" type="password" value={pwdForm.confirm}
+            onChange={e=>setPwdForm(f=>({...f,confirm:e.target.value}))} placeholder="Repeat new password"/>
         </div>
-        <div style={{ overflowX:"auto" }}>
-          <table style={{ borderCollapse:"collapse", fontSize:12 }}>
-            <thead>
-              <tr>
-                <th style={{ padding:"6px 12px", textAlign:"left", fontWeight:600, color:MUTED, width:160 }}>Employee</th>
-                {WEEKS.map(w=>(
-                  <th key={w} style={{ padding:"6px 10px", textAlign:"center", fontWeight:600, color:MUTED, minWidth:80 }}>{w.replace("2026-","")}</th>
-                ))}
-                <th style={{ padding:"6px 10px", textAlign:"center", fontWeight:600, color:MUTED }}>Avg</th>
-              </tr>
-            </thead>
-            <tbody>
-              {heatRows.map(row=>{
-                const validPcts = row.cells.filter(c=>c.pct>0).map(c=>c.pct);
-                const avg = validPcts.length ? Math.round(validPcts.reduce((s,v)=>s+v,0)/validPcts.length) : 0;
-                return (
-                  <tr key={row.emp.id}>
-                    <td style={{ padding:"6px 12px" }}>
-                      <div style={{ display:"flex", alignItems:"center", gap:8 }}>
-                        <Av name={row.emp.name} color={row.emp.color} sz={22} />
-                        <span style={{ fontWeight:500 }}>{row.emp.name.split(" ")[0]}</span>
-                      </div>
-                    </td>
-                    {row.cells.map(c=>{
-                      const { bg, fg } = utilColor(c.pct);
-                      return (
-                        <td key={c.week} style={{ padding:"4px 6px", textAlign:"center" }}>
-                          <div style={{ background:bg, color:fg, borderRadius:6, padding:"5px 8px", fontWeight:700, fontSize:12 }}>
-                            {c.pct > 0 ? c.pct+"%" : "-"}
-                          </div>
-                        </td>
-                      );
-                    })}
-                    <td style={{ padding:"4px 10px", textAlign:"center" }}>
-                      <div style={{ background:utilColor(avg).bg, color:utilColor(avg).fg, borderRadius:6, padding:"5px 8px", fontWeight:700, fontSize:12 }}>
-                        {avg > 0 ? avg+"%" : "-"}
-                      </div>
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        </div>
+        <Btn primary disabled={pwdSaving} onClick={changePwd}>
+          {pwdSaving?<><Spinner/>Updating...</>:"Update Password"}
+        </Btn>
       </Card>
     </div>
   );
 }
 
-/* ─── TIMESHEETS ─────────────────────────────────────────────── */
-function Timesheets({ entries, setEntries, projects, employees, allocs }) {
-  const [selEmp, setSelEmp] = useState(String(employees[0]?.id||""));
-  const [week, setWeek]     = useState(WEEKS[WEEKS.length-1]);
-  const [hours, setHours]   = useState({});
-  const [notes, setNotes]   = useState({});
-  const [saved, setSaved]   = useState(false);
+/* ── LEAVES ─────────────────────────────────────────────────── */
+function Leaves({ user, employees, leaves, setLeaves }) {
+  const isAdmin   = user.role==="admin";
+  const isManager = user.role==="manager";
+  const [form,    setForm]   = useState({ empId:user.employeeId||"",type:"Annual",from:"",to:"",reason:"" });
+  const [saving,  setSaving] = useState(false);
 
-  const emp = employees.find(e=>String(e.id)===selEmp);
-  const empAllocs = allocs.filter(a=>a.empId===emp?.id);
-  const empProjs  = projects.filter(p=>empAllocs.find(a=>a.projId===p.id));
+  const canApprove = isAdmin||isManager;
 
-  const totalLogged = Object.values(hours).reduce((s,v)=>s+(+v||0),0);
-  const capacity    = emp?.capacity || 40;
+  const visibleLeaves = isAdmin ? leaves
+    : isManager ? leaves.filter(l=>employees.find(e=>e.id===l.empId&&(e.teamId===user.teamId||e.managerId===user.employeeId))||l.empId===user.employeeId)
+    : leaves.filter(l=>l.empId===user.employeeId);
 
-  const save = () => {
-    const toRemove = entries.filter(e=>String(e.empId)===selEmp&&e.week===week).map(e=>e.id);
-    const newEntries = empProjs
-      .filter(p=>hours[p.id]&&+hours[p.id]>0)
-      .map(p=>({ id:Date.now()+p.id, empId:emp.id, projId:p.id, week, hours:+hours[p.id], note:notes[p.id]||"" }));
-    setEntries(prev=>[...prev.filter(e=>!toRemove.includes(e.id)),...newEntries]);
-    setSaved(true);
-    setTimeout(()=>setSaved(false),2000);
-  };
-
-  // Load existing entries when emp/week changes
-  const loadExisting = () => {
-    const existing = entries.filter(e=>String(e.empId)===selEmp&&e.week===week);
-    const h={}, n={};
-    existing.forEach(e=>{ h[e.projId]=String(e.hours); n[e.projId]=e.note||""; });
-    setHours(h); setNotes(n);
-  };
-
-  return (
-    <div>
-      <div style={{ marginBottom:18 }}>
-        <h1 style={{ fontSize:22, fontWeight:800, color:TEXT, margin:"0 0 3px" }}>Timesheets</h1>
-        <p style={{ color:MUTED, fontSize:13, margin:0 }}>Log weekly hours per project</p>
-      </div>
-
-      <div style={{ display:"grid", gridTemplateColumns:"300px 1fr", gap:14 }}>
-        <div>
-          <Card style={{ marginBottom:14 }}>
-            <div style={{ fontSize:13, fontWeight:700, marginBottom:12 }}>Select Employee</div>
-            <select value={selEmp} onChange={e=>{setSelEmp(e.target.value);setHours({});setNotes({});}}
-              style={{ width:"100%", padding:"8px 10px", border:"1px solid "+BORDER, borderRadius:6, fontSize:13, marginBottom:12 }}>
-              {employees.filter(e=>e.active).map(e=><option key={e.id} value={e.id}>{e.name}</option>)}
-            </select>
-
-            {emp && (
-              <div style={{ display:"flex", alignItems:"center", gap:10, padding:10, background:"#F0FDF9", borderRadius:8, border:"1px solid #06D6A022" }}>
-                <Av name={emp.name} color={emp.color} sz={36} />
-                <div>
-                  <div style={{ fontSize:13, fontWeight:700 }}>{emp.name}</div>
-                  <div style={{ fontSize:12, color:MUTED }}>{emp.role}  -  {emp.dept}</div>
-                  <div style={{ fontSize:12, color:MUTED }}>Capacity: {emp.capacity}h/wk</div>
-                </div>
-              </div>
-            )}
-          </Card>
-
-          <Card>
-            <div style={{ fontSize:13, fontWeight:700, marginBottom:12 }}>Select Week</div>
-            <div style={{ display:"flex", flexDirection:"column", gap:6 }}>
-              {WEEKS.map(w=>(
-                <button key={w} onClick={()=>{setWeek(w);setHours({});setNotes({});}}
-                  style={{ padding:"8px 12px", borderRadius:8, border:"1px solid "+(week===w?TEAL:BORDER),
-                    background:week===w?TEAL:WHITE, color:week===w?"#fff":TEXT,
-                    fontSize:13, fontWeight:week===w?700:400, cursor:"pointer", textAlign:"left" }}>
-                  {w}
-                  {entries.some(e=>String(e.empId)===selEmp&&e.week===w) && (
-                    <span style={{ marginLeft:8, fontSize:10, background:week===w?"#ffffff33":"#D1FAE5",
-                      color:week===w?"#fff":"#065F46", borderRadius:4, padding:"1px 6px" }}>logged</span>
-                  )}
-                </button>
-              ))}
-            </div>
-          </Card>
-        </div>
-
-        <Card>
-          <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:16 }}>
-            <div>
-              <div style={{ fontSize:14, fontWeight:700 }}>Hours for {week}</div>
-              <div style={{ fontSize:12, color:MUTED, marginTop:2 }}>
-                {totalLogged}h logged of {capacity}h capacity
-                <span style={{ marginLeft:8, fontWeight:700, color:totalLogged>capacity?"#EF4444":TEAL }}>{capacity>0?Math.round((totalLogged/capacity)*100):0}%</span>
-              </div>
-            </div>
-            <div style={{ display:"flex", gap:8 }}>
-              <Btn small onClick={loadExisting}>Load Saved</Btn>
-              <Btn primary small onClick={save}>{saved?"Saved!":"Save Hours"}</Btn>
-            </div>
-          </div>
-
-          {empProjs.length===0 ? (
-            <div style={{ textAlign:"center", padding:"40px 0", color:MUTED, fontSize:13 }}>
-              {emp ? emp.name+" is not allocated to any projects yet." : "Select an employee."}
-            </div>
-          ) : (
-            <div>
-              <div style={{ display:"grid", gridTemplateColumns:"1fr 100px 1fr", gap:10, marginBottom:8, padding:"0 4px" }}>
-                <span style={{ fontSize:11, fontWeight:700, color:MUTED, textTransform:"uppercase", letterSpacing:0.5 }}>Project</span>
-                <span style={{ fontSize:11, fontWeight:700, color:MUTED, textTransform:"uppercase", letterSpacing:0.5 }}>Hours</span>
-                <span style={{ fontSize:11, fontWeight:700, color:MUTED, textTransform:"uppercase", letterSpacing:0.5 }}>Notes</span>
-              </div>
-              {empProjs.map(p=>{
-                const alloc = empAllocs.find(a=>a.projId===p.id);
-                return (
-                  <div key={p.id} style={{ display:"grid", gridTemplateColumns:"1fr 100px 1fr", gap:10, marginBottom:10, alignItems:"center",
-                    padding:"10px 12px", background:"#F8FAFC", borderRadius:8, border:"1px solid "+BORDER }}>
-                    <div>
-                      <div style={{ fontSize:13, fontWeight:600 }}>{p.name}</div>
-                      <div style={{ fontSize:11, color:MUTED }}>{p.client}  -  allocated {alloc?.hoursPerWeek||0}h/wk</div>
-                    </div>
-                    <input type="number" min="0" max="80" placeholder="0" value={hours[p.id]||""}
-                      onChange={e=>setHours(h=>({...h,[p.id]:e.target.value}))}
-                      style={{ padding:"7px 10px", border:"1px solid "+(hours[p.id]>0?TEAL:BORDER),
-                        borderRadius:6, fontSize:14, fontWeight:700, textAlign:"center", boxSizing:"border-box", width:"100%",
-                        background:hours[p.id]>0?"#F0FDF9":WHITE }} />
-                    <input type="text" placeholder="What did you work on?" value={notes[p.id]||""}
-                      onChange={e=>setNotes(n=>({...n,[p.id]:e.target.value}))}
-                      style={{ padding:"7px 10px", border:"1px solid "+BORDER, borderRadius:6, fontSize:13, boxSizing:"border-box", width:"100%" }} />
-                  </div>
-                );
-              })}
-
-              <div style={{ marginTop:12, padding:"10px 14px", background:"#F8FAFC", borderRadius:8, border:"1px solid "+(totalLogged>capacity?"#FCA5A5":BORDER) }}>
-                <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center" }}>
-                  <span style={{ fontSize:13, fontWeight:600 }}>Total hours logged</span>
-                  <span style={{ fontSize:18, fontWeight:800, color:totalLogged>capacity?"#EF4444":TEAL }}>{totalLogged}h</span>
-                </div>
-                {totalLogged>capacity && (
-                  <div style={{ fontSize:12, color:"#EF4444", marginTop:4 }}>Warning: {totalLogged-capacity}h over capacity</div>
-                )}
-              </div>
-            </div>
-          )}
-        </Card>
-      </div>
-    </div>
-  );
-}
-
-/* ─── LEAVES ─────────────────────────────────────────────────── */
-function Leaves({ leaves, setLeaves, employees, role }) {
-  const [form, setForm] = useState({ empId:"", type:"Annual", from:"", to:"", reason:"" });
-  const apply = () => {
+  const apply = async () => {
     if (!form.from||!form.to||!form.empId) return;
     const days=Math.max(1,Math.ceil((new Date(form.to)-new Date(form.from))/864e5)+1);
-    setLeaves(p=>[...p,{id:Date.now(),...form,empId:+form.empId,days,status:"pending"}]);
-    setForm({empId:"",type:"Annual",from:"",to:"",reason:""});
+    setSaving(true);
+    const { data,error } = await sb.from("leaves").insert({
+      employee_id:form.empId,type:form.type,from_date:form.from,
+      to_date:form.to,days,reason:form.reason,status:"pending",
+    }).select().single();
+    setSaving(false);
+    if (!error&&data) {
+      setLeaves(prev=>[{ id:data.id,empId:data.employee_id,type:data.type,from:data.from_date,
+        to:data.to_date,days:data.days,status:data.status,reason:data.reason },...prev]);
+      setForm(f=>({...f,from:"",to:"",reason:""}));
+    }
   };
-  const upd=(id,s)=>setLeaves(p=>p.map(l=>l.id===id?{...l,status:s}:l));
-  const pending=leaves.filter(l=>l.status==="pending");
-  const hist=leaves.filter(l=>l.status!=="pending");
+
+  const updateStatus = async (id,status) => {
+    const { error } = await sb.from("leaves").update({ status }).eq("id",id);
+    if (!error) setLeaves(prev=>prev.map(l=>l.id===id?{...l,status}:l));
+  };
+
+  const pending = visibleLeaves.filter(l=>l.status==="pending");
+  const hist    = visibleLeaves.filter(l=>l.status!=="pending");
 
   return (
     <div>
       <div style={{ marginBottom:18 }}>
-        <h1 style={{ fontSize:22, fontWeight:800, color:TEXT, margin:"0 0 3px" }}>Leave Management</h1>
-        <p style={{ color:MUTED, fontSize:13, margin:0 }}>Apply and approve leave requests</p>
+        <h1 style={{ fontSize:22,fontWeight:800,color:TEXT,margin:"0 0 3px" }}>Leave Management</h1>
+        <p style={{ color:MUTED,fontSize:13,margin:0 }}>Submit and track leave requests</p>
       </div>
-      <div style={{ display:"grid", gridTemplateColumns:"320px 1fr", gap:14 }}>
-        <Card>
-          <div style={{ fontSize:14, fontWeight:700, marginBottom:14 }}>Apply for Leave</div>
-          <div style={{ marginBottom:10 }}>
-            <label style={{ fontSize:11, color:MUTED, display:"block", marginBottom:4, fontWeight:500 }}>Employee</label>
-            <select value={form.empId} onChange={e=>setForm(f=>({...f,empId:e.target.value}))}
-              style={{ width:"100%", padding:"7px 10px", border:"1px solid "+BORDER, borderRadius:6, fontSize:13 }}>
-              <option value="">Select employee...</option>
-              {employees.filter(e=>e.active).map(e=><option key={e.id} value={e.id}>{e.name}</option>)}
-            </select>
-          </div>
-          {[["Type","type","sel"],["From","from","date"],["To","to","date"]].map(([lbl,k,t])=>(
-            <div key={k} style={{ marginBottom:10 }}>
-              <label style={{ fontSize:11, color:MUTED, display:"block", marginBottom:4, fontWeight:500 }}>{lbl}</label>
-              {t==="sel"
-                ?<select value={form[k]} onChange={e=>setForm(f=>({...f,[k]:e.target.value}))}
-                    style={{ width:"100%", padding:"7px 10px", border:"1px solid "+BORDER, borderRadius:6, fontSize:13 }}>
-                    {["Annual","Sick","Casual","Maternity","Paternity"].map(x=><option key={x}>{x}</option>)}
-                  </select>
-                :<input type="date" value={form[k]} onChange={e=>setForm(f=>({...f,[k]:e.target.value}))}
-                    style={{ width:"100%", padding:"7px 10px", border:"1px solid "+BORDER, borderRadius:6, fontSize:13, boxSizing:"border-box" }} />
-              }
-            </div>
-          ))}
-          <div style={{ marginBottom:14 }}>
-            <label style={{ fontSize:11, color:MUTED, display:"block", marginBottom:4, fontWeight:500 }}>Reason</label>
-            <textarea value={form.reason} onChange={e=>setForm(f=>({...f,reason:e.target.value}))} rows={2}
-              style={{ width:"100%", padding:"7px 10px", border:"1px solid "+BORDER, borderRadius:6, fontSize:13, resize:"none", boxSizing:"border-box" }} />
-          </div>
-          <Btn primary full onClick={apply}>Submit Request</Btn>
+      <div style={{ display:"grid",gridTemplateColumns:"320px 1fr",gap:14 }}>
+        <Card style={{ height:"fit-content" }}>
+          <div style={{ fontSize:14,fontWeight:700,marginBottom:14 }}>Apply for Leave</div>
+          {(isAdmin||isManager)&&(
+            <Sel label="Employee" value={form.empId} onChange={e=>setForm(f=>({...f,empId:e.target.value}))} options={[
+              {value:"",label:"Select employee..."},
+              ...employees.filter(e=>e.active).map(e=>({value:e.id,label:e.name}))
+            ]}/>
+          )}
+          <Sel label="Leave Type" value={form.type} onChange={e=>setForm(f=>({...f,type:e.target.value}))} options={
+            ["Annual","Sick","Casual","Maternity","Paternity"].map(t=>({value:t,label:t}))
+          }/>
+          <Input label="From" type="date" value={form.from} onChange={e=>setForm(f=>({...f,from:e.target.value}))} required/>
+          <Input label="To"   type="date" value={form.to}   onChange={e=>setForm(f=>({...f,to:e.target.value}))}   required/>
+          <Input label="Reason" value={form.reason} onChange={e=>setForm(f=>({...f,reason:e.target.value}))} placeholder="Optional"/>
+          <Btn primary full disabled={saving} onClick={apply}>
+            {saving?<><Spinner/>Submitting...</>:"Submit Request"}
+          </Btn>
         </Card>
-
         <div>
-          {role==="admin" && pending.length>0 && (
-            <Card style={{ marginBottom:14, border:"1px solid #FDE68A" }}>
-              <SecHd title={"Pending Approvals ("+pending.length+")"} />
+          {canApprove&&pending.length>0&&(
+            <Card style={{ marginBottom:14,border:"1px solid #FDE68A" }}>
+              <SecHd title={"Pending Approvals ("+pending.length+")"}/>
               {pending.map(l=>{
                 const e=employees.find(em=>em.id===l.empId);
                 return (
-                  <div key={l.id} style={{ display:"flex", alignItems:"center", gap:10, padding:12,
-                    background:"#FFFBEB", borderRadius:8, border:"1px solid #FDE68A", marginBottom:8 }}>
-                    <Av name={e?.name||"?"} color={e?.color||TEAL} sz={30} />
+                  <div key={l.id} style={{ display:"flex",alignItems:"center",gap:10,padding:12,
+                    background:"#FFFBEB",borderRadius:8,border:"1px solid #FDE68A",marginBottom:8 }}>
+                    <Av name={e?.name||"?"} color={e?.color||TEAL} sz={30}/>
                     <div style={{ flex:1 }}>
-                      <div style={{ fontSize:13, fontWeight:600 }}>{e?.name}</div>
-                      <div style={{ fontSize:12, color:MUTED }}>{l.type}  -  {l.from} to {l.to}  -  {l.days} day{l.days>1?"s":""}</div>
-                      <div style={{ fontSize:12, color:"#94A3B8" }}>{l.reason}</div>
+                      <div style={{ fontSize:13,fontWeight:600 }}>{e?.name}</div>
+                      <div style={{ fontSize:12,color:MUTED }}>{l.type} - {l.from} to {l.to} - {l.days} day{l.days>1?"s":""}</div>
+                      {l.reason&&<div style={{ fontSize:12,color:"#94A3B8" }}>{l.reason}</div>}
                     </div>
-                    <div style={{ display:"flex", gap:6 }}>
-                      <Btn small onClick={()=>upd(l.id,"approved")} style={{ background:"#D1FAE5",color:"#065F46",border:"none" }}>Approve</Btn>
-                      <Btn small danger onClick={()=>upd(l.id,"rejected")}>Reject</Btn>
+                    <div style={{ display:"flex",gap:6 }}>
+                      <Btn small onClick={()=>updateStatus(l.id,"approved")} style={{ background:"#D1FAE5",color:"#065F46",border:"none" }}>Approve</Btn>
+                      <Btn small danger onClick={()=>updateStatus(l.id,"rejected")}>Reject</Btn>
                     </div>
                   </div>
                 );
@@ -1049,20 +955,20 @@ function Leaves({ leaves, setLeaves, employees, role }) {
             </Card>
           )}
           <Card>
-            <SecHd title="Leave History" />
-            {hist.length===0 && <div style={{ color:"#94A3B8", fontSize:13 }}>No leave history yet.</div>}
+            <SecHd title={canApprove?"All Leave History":"My Leave History"}/>
+            {hist.length===0&&<div style={{ color:"#94A3B8",fontSize:13,textAlign:"center",padding:"24px 0" }}>No leave history yet.</div>}
             {hist.map(l=>{
               const e=employees.find(em=>em.id===l.empId);
               return (
-                <div key={l.id} style={{ display:"flex", alignItems:"center", gap:10, padding:"10px 12px",
-                  background:"#F8FAFC", borderRadius:8, marginBottom:7, border:"1px solid "+BORDER }}>
-                  <Av name={e?.name||"?"} color={e?.color||TEAL} sz={26} />
+                <div key={l.id} style={{ display:"flex",alignItems:"center",gap:10,padding:"10px 12px",
+                  background:"#F8FAFC",borderRadius:8,marginBottom:7,border:"1px solid "+BORDER }}>
+                  <Av name={e?.name||"?"} color={e?.color||TEAL} sz={26}/>
                   <div style={{ flex:1 }}>
-                    <span style={{ fontSize:13, fontWeight:500 }}>{e?.name}</span>
-                    <span style={{ fontSize:12, color:MUTED }}>  -  {l.type} Leave</span>
-                    <div style={{ fontSize:12, color:"#94A3B8" }}>{l.from} to {l.to}  -  {l.days} day{l.days>1?"s":""}</div>
+                    <span style={{ fontSize:13,fontWeight:500 }}>{e?.name}</span>
+                    <span style={{ fontSize:12,color:MUTED }}> - {l.type} Leave</span>
+                    <div style={{ fontSize:12,color:"#94A3B8" }}>{l.from} to {l.to} - {l.days} day{l.days>1?"s":""}</div>
                   </div>
-                  <Badge s={l.status} />
+                  <Badge s={l.status}/>
                 </div>
               );
             })}
@@ -1073,96 +979,253 @@ function Leaves({ leaves, setLeaves, employees, role }) {
   );
 }
 
-/* ─── ROOT ───────────────────────────────────────────────────── */
+/* ── HELPERS ────────────────────────────────────────────────── */
+function currentWeek() {
+  const now=new Date();
+  const jan1=new Date(now.getFullYear(),0,1);
+  const wk=Math.ceil(((now-jan1)/864e5+jan1.getDay()+1)/7);
+  return now.getFullYear()+"-W"+String(wk).padStart(2,"0");
+}
+
+const DEPT_COLORS={ Engineering:"#3B82F6",Design:"#8B5CF6",Product:"#F59E0B",QA:"#10B981",HR:"#EC4899",Finance:"#F97316",Marketing:"#06D6A0" };
+const deptColor=d=>DEPT_COLORS[d]||"#64748B";
+
+const toEmp=r=>({
+  id:r.id,name:r.name||"",email:r.email||"",dept:r.department||"",
+  role:r.role||"",capacity:r.capacity||40,active:r.active!==false,
+  teamId:r.team_id||null,managerId:r.manager_id||null,phone:r.phone||"",
+  appRole:"user",color:deptColor(r.department),
+  init:(r.name||"?").split(" ").map(p=>p[0]).join("").slice(0,2).toUpperCase(),
+});
+const toLeave=r=>({ id:r.id,empId:r.employee_id,type:r.type,from:r.from_date,
+  to:r.to_date,days:r.days,status:r.status,reason:r.reason||"" });
+const toAlloc=r=>({ id:r.id,empId:r.employee_id,projId:r.project_id,hoursPerWeek:r.hours_per_week });
+const toEntry=r=>({ id:r.id,empId:r.employee_id,projId:r.project_id,week:r.week,hours:Number(r.hours),note:r.note||"" });
+const toTeam=r=>({ id:r.id,name:r.name,description:r.description||"",managerId:r.manager_id||null,color:r.color||TEAL,members:[] });
+
+/* ── ROOT APP ───────────────────────────────────────────────── */
 export default function App() {
+  const [session,   setSession]   = useState(null);
+  const [authLoading,setAuthLoading]=useState(true);
+  const [user,      setUser]      = useState(null);
   const [view,      setView]      = useState("dashboard");
-  const [role,      setRole]      = useState("admin");
-  const [employees, setEmployees] = useState(SEED_EMP);
-  const [projects,  setProjects]  = useState(SEED_PROJ);
-  const [allocs,    setAllocs]    = useState(SEED_ALLOC);
-  const [entries,   setEntries]   = useState(SEED_ENTRIES);
-  const [leaves,    setLeaves]    = useState(SEED_LEAVES);
+  const [dataLoading,setDataLoading]=useState(false);
+  const [employees, setEmployees] = useState([]);
+  const [projects,  setProjects]  = useState([]);
+  const [allocs,    setAllocs]    = useState([]);
+  const [entries,   setEntries]   = useState([]);
+  const [leaves,    setLeaves]    = useState([]);
+  const [teams,     setTeams]     = useState([]);
+  const [notifCount,setNotifCount]= useState(0);
+
+  /* Auth listener */
+  useEffect(()=>{
+    sb.auth.getSession().then(({ data:{ session:s } })=>{
+      setSession(s); setAuthLoading(false);
+    });
+    const { data:{ subscription } } = sb.auth.onAuthStateChange((_event,s)=>{
+      setSession(s);
+    });
+    return ()=>subscription.unsubscribe();
+  },[]);
+
+  /* Load user profile + data when session changes */
+  useEffect(()=>{
+    if (!session) { setUser(null); return; }
+    loadUserAndData(session.user);
+  },[session]);
+
+  async function loadUserAndData(authUser) {
+    setDataLoading(true);
+    /* Load profile */
+    const { data:profile } = await sb.from("app_users").select("*").eq("id",authUser.id).single();
+    const userObj = {
+      id:        authUser.id,
+      email:     authUser.email,
+      name:      profile?.name || authUser.user_metadata?.name || authUser.email?.split("@")[0] || "User",
+      role:      profile?.role || authUser.user_metadata?.role || "user",
+      teamId:    profile?.team_id || null,
+      employeeId:profile?.employee_id || null,
+      avatarColor:profile?.avatar_color || TEAL,
+      phone:     profile?.phone || "",
+    };
+    setUser(userObj);
+
+    /* Load data based on role */
+    const isAdmin   = userObj.role==="admin";
+    const isManager = userObj.role==="manager";
+
+    const [empRes,projRes,allocRes,entryRes,leaveRes,teamRes,memberRes] = await Promise.all([
+      sb.from("employees").select("*").order("name"),
+      sb.from("projects").select("*").order("name"),
+      sb.from("allocations").select("*"),
+      sb.from("time_entries").select("*"),
+      sb.from("leaves").select("*").order("created_at",{ ascending:false }),
+      sb.from("teams").select("*").order("name"),
+      sb.from("team_members").select("*"),
+    ]);
+
+    const allEmps   = (empRes.data||[]).map(toEmp);
+    const allLeaves = (leaveRes.data||[]).map(toLeave);
+    const allTeams  = (teamRes.data||[]).map(toTeam);
+    const members   = memberRes.data||[];
+
+    /* Attach members to teams */
+    allTeams.forEach(t=>{ t.members=members.filter(m=>m.team_id===t.id).map(m=>m.employee_id); });
+
+    /* Attach app role to employees by cross-referencing app_users */
+    const { data:appUsers } = await sb.from("app_users").select("id,role,employee_id");
+    allEmps.forEach(e=>{
+      const au=appUsers?.find(u=>u.employee_id===e.id);
+      if (au) e.appRole=au.role;
+    });
+
+    /* Role-filter */
+    let visEmps = allEmps;
+    if (!isAdmin&&!isManager) visEmps=allEmps.filter(e=>e.id===userObj.employeeId);
+
+    const visEntries = isAdmin ? (entryRes.data||[]).map(toEntry)
+      : (entryRes.data||[]).map(toEntry).filter(e=>visEmps.find(em=>em.id===e.empId));
+
+    const visLeaves  = isAdmin ? allLeaves
+      : allLeaves.filter(l=>visEmps.find(e=>e.id===l.empId));
+
+    setEmployees(visEmps);
+    setProjects((projRes.data||[]).map(p=>({ id:p.id,name:p.name,client:p.client||"",
+      status:p.status||"planning",start:p.start_date||"",end:p.end_date||"",budgetHours:p.budget_hours||0 })));
+    setAllocs((allocRes.data||[]).map(toAlloc));
+    setEntries(visEntries);
+    setLeaves(visLeaves);
+    setTeams(allTeams);
+
+    /* Notification count */
+    const { count } = await sb.from("notifications").select("id",{ count:"exact",head:true })
+      .eq("user_id",authUser.id).eq("read",false);
+    setNotifCount(count||0);
+
+    setDataLoading(false);
+  }
+
+  const logout = async () => {
+    await sb.auth.signOut();
+    setSession(null); setUser(null);
+  };
+
+  /* Nav by role */
+  const isAdmin   = user?.role==="admin";
+  const isManager = user?.role==="manager";
 
   const nav = [
-    { id:"dashboard",   label:"Dashboard",    icon:"📊" },
-    { id:"employees",   label:"Employees",    icon:"👥" },
-    { id:"projects",    label:"Projects",     icon:"📁" },
-    { id:"utilization", label:"Utilization",  icon:"📈" },
-    { id:"timesheets",  label:"Timesheets",   icon:"⏱️" },
-    { id:"leaves",      label:"Leaves",       icon:"📅" },
-    ...(role==="admin"?[{ id:"jira", label:"Jira (Soon)", icon:"🔗" }]:[]),
+    { id:"dashboard", label:"Dashboard",  icon:"📊" },
+    ...(isAdmin||isManager?[{ id:"teams",     label:"Teams",      icon:"🏢" }]:[]),
+    ...(isAdmin           ?[{ id:"employees", label:"Employees",  icon:"👥" }]:[]),
+    { id:"leaves",    label:"Leaves",     icon:"📅", badge:isAdmin||isManager?leaves.filter(l=>l.status==="pending").length:0 },
+    { id:"timesheets",label:"Timesheets", icon:"⏱️" },
+    { id:"profile",   label:"My Profile", icon:"👤" },
   ];
+
+  /* Loading states */
+  if (authLoading) return (
+    <div style={{ display:"flex",alignItems:"center",justifyContent:"center",height:"100vh",background:BG,flexDirection:"column",gap:12,fontFamily:"'Segoe UI',system-ui,sans-serif" }}>
+      <Spinner dark/><div style={{ fontSize:14,color:MUTED }}>Loading...</div>
+    </div>
+  );
+
+  if (!session || !user) return (
+    <>
+      <style>{"@keyframes spin{to{transform:rotate(360deg)}}"}</style>
+      <LoginPage onLogin={()=>{}} />
+    </>
+  );
+
+  if (dataLoading) return (
+    <div style={{ display:"flex",alignItems:"center",justifyContent:"center",height:"100vh",background:BG,flexDirection:"column",gap:12,fontFamily:"'Segoe UI',system-ui,sans-serif" }}>
+      <Spinner dark/><div style={{ fontSize:14,color:MUTED }}>Loading your data...</div>
+    </div>
+  );
 
   return (
     <>
       <style>{"@keyframes spin{to{transform:rotate(360deg)}}"}</style>
-      <div style={{ display:"flex", fontFamily:"'Segoe UI',system-ui,sans-serif", background:BG, minHeight:"100vh" }}>
-        <aside style={{ width:220, background:NAV, position:"sticky", top:0, height:"100vh",
-          display:"flex", flexDirection:"column", flexShrink:0, overflowY:"auto" }}>
-          <div style={{ padding:"18px 14px 14px", borderBottom:"1px solid #ffffff14" }}>
-            <div style={{ display:"flex", alignItems:"center", gap:8 }}>
-              <div style={{ width:30,height:30,borderRadius:8,background:TEAL,display:"flex",alignItems:"center",
-                justifyContent:"center",color:NAV,fontWeight:900,fontSize:15 }}>R</div>
-              <span style={{ color:"#fff",fontWeight:800,fontSize:16 }}>ResTrack</span>
-            </div>
-            <div style={{ fontSize:11, color:"#ffffff50", marginTop:3 }}>Resource Utilization</div>
-          </div>
+      <div style={{ display:"flex",fontFamily:"'Segoe UI',system-ui,sans-serif",background:BG,minHeight:"100vh" }}>
 
-          <div style={{ padding:"10px 14px", borderBottom:"1px solid #ffffff14" }}>
-            <div style={{ fontSize:10,color:"#ffffff40",marginBottom:5,textTransform:"uppercase",letterSpacing:1 }}>View As</div>
-            <div style={{ display:"flex", background:"#ffffff12", borderRadius:7, padding:2 }}>
-              {["admin","user"].map(r=>(
-                <button key={r} onClick={()=>setRole(r)} style={{ flex:1,padding:4,border:"none",borderRadius:6,
-                  cursor:"pointer",background:role===r?TEAL:"transparent",color:role===r?NAV:"#ffffff70",
-                  fontSize:11,fontWeight:600,textTransform:"capitalize",transition:"all .2s" }}>{r}</button>
-              ))}
+        {/* Sidebar */}
+        <aside style={{ width:230,background:NAV,position:"sticky",top:0,height:"100vh",
+          display:"flex",flexDirection:"column",flexShrink:0,overflowY:"auto" }}>
+          <div style={{ padding:"18px 16px 14px",borderBottom:"1px solid #ffffff14" }}>
+            <div style={{ display:"flex",alignItems:"center",gap:10 }}>
+              <div style={{ width:32,height:32,borderRadius:9,background:TEAL,display:"flex",alignItems:"center",
+                justifyContent:"center",color:NAV,fontWeight:900,fontSize:16 }}>R</div>
+              <div>
+                <div style={{ color:"#fff",fontWeight:800,fontSize:16 }}>ResTrack</div>
+                <div style={{ fontSize:10,color:"#ffffff50" }}>Resource Management</div>
+              </div>
             </div>
           </div>
 
-          <nav style={{ flex:1, padding:"10px 7px" }}>
+          {/* User pill */}
+          <div style={{ padding:"12px 16px",borderBottom:"1px solid #ffffff14" }}>
+            <div style={{ display:"flex",alignItems:"center",gap:10,padding:"8px 10px",
+              background:"#ffffff0e",borderRadius:10 }}>
+              <div style={{ width:32,height:32,borderRadius:"50%",background:(user.avatarColor||TEAL)+"33",
+                color:user.avatarColor||TEAL,fontWeight:700,fontSize:12,display:"flex",alignItems:"center",
+                justifyContent:"center",flexShrink:0,border:"1.5px solid "+(user.avatarColor||TEAL)+"44" }}>
+                {(user.name||"?").split(" ").map(p=>p[0]).join("").slice(0,2).toUpperCase()}
+              </div>
+              <div style={{ flex:1,minWidth:0 }}>
+                <div style={{ fontSize:12,color:"#fff",fontWeight:600,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap" }}>{user.name}</div>
+                <div style={{ fontSize:10,color:"#ffffff50",textTransform:"capitalize" }}>{user.role}</div>
+              </div>
+            </div>
+          </div>
+
+          <nav style={{ flex:1,padding:"10px 8px" }}>
             {nav.map(item=>(
               <button key={item.id} onClick={()=>setView(item.id)} style={{
-                display:"flex",alignItems:"center",gap:9,width:"100%",padding:"8px 10px",borderRadius:8,
-                border:"none",cursor:item.id==="jira"?"not-allowed":"pointer",
-                background:view===item.id?"#ffffff16":"transparent",
-                color:view===item.id?"#fff":item.id==="jira"?"#ffffff30":"#ffffff65",
-                fontSize:13,fontWeight:view===item.id?600:400,marginBottom:1,
+                display:"flex",alignItems:"center",gap:10,width:"100%",padding:"9px 10px",
+                borderRadius:9,border:"none",cursor:"pointer",
+                background:view===item.id?"#ffffff18":"transparent",
+                color:view===item.id?"#fff":"#ffffff60",
+                fontSize:13,fontWeight:view===item.id?600:400,marginBottom:2,
                 transition:"all .15s",textAlign:"left",
                 borderLeft:view===item.id?"2.5px solid "+TEAL:"2.5px solid transparent" }}>
-                <span style={{ fontSize:15 }}>{item.icon}</span>
+                <span style={{ fontSize:16 }}>{item.icon}</span>
                 <span style={{ flex:1 }}>{item.label}</span>
+                {item.badge>0&&<span style={{ background:"#EF4444",color:"#fff",borderRadius:999,
+                  padding:"1px 6px",fontSize:10,fontWeight:700 }}>{item.badge}</span>}
               </button>
             ))}
           </nav>
 
-          <div style={{ padding:"12px 14px", borderTop:"1px solid #ffffff14" }}>
-            <div style={{ display:"flex",alignItems:"center",gap:8 }}>
-              <Av name="Alex Chen" color={TEAL} sz={26} />
-              <div>
-                <div style={{ fontSize:12,color:"#fff",fontWeight:500 }}>Alex Chen</div>
-                <div style={{ fontSize:10,color:"#ffffff50" }}>Administrator</div>
-              </div>
-            </div>
+          <div style={{ padding:"12px 16px",borderTop:"1px solid #ffffff14" }}>
+            <button onClick={logout} style={{ display:"flex",alignItems:"center",gap:8,width:"100%",
+              padding:"8px 10px",borderRadius:9,border:"none",cursor:"pointer",
+              background:"transparent",color:"#ffffff50",fontSize:13,textAlign:"left",
+              transition:"all .15s" }}
+              onMouseEnter={e=>e.currentTarget.style.color="#fff"}
+              onMouseLeave={e=>e.currentTarget.style.color="#ffffff50"}>
+              <span style={{ fontSize:16 }}>🚪</span>Sign Out
+            </button>
           </div>
         </aside>
 
-        <main style={{ flex:1, padding:24, overflowX:"hidden" }}>
-          {view==="dashboard"   && <Dashboard   employees={employees} projects={projects} allocs={allocs} entries={entries} leaves={leaves} setView={setView} />}
-          {view==="employees"   && <Employees   employees={employees} setEmployees={setEmployees} allocs={allocs} />}
-          {view==="projects"    && <Projects    projects={projects} setProjects={setProjects} allocs={allocs} setAllocs={setAllocs} employees={employees} />}
-          {view==="utilization" && <Utilization employees={employees} allocs={allocs} entries={entries} />}
-          {view==="timesheets"  && <Timesheets  entries={entries} setEntries={setEntries} projects={projects} employees={employees} allocs={allocs} />}
-          {view==="leaves"      && <Leaves      leaves={leaves} setLeaves={setLeaves} employees={employees} role={role} />}
-          {view==="jira"        && (
+        {/* Main */}
+        <main style={{ flex:1,padding:28,overflowX:"hidden",maxWidth:"calc(100vw - 230px)" }}>
+          {view==="dashboard"  && <Dashboard  user={user} employees={employees} projects={projects} allocs={allocs} entries={entries} leaves={leaves} teams={teams} setView={setView}/>}
+          {view==="employees"  && <Employees  user={user} employees={employees} setEmployees={setEmployees} allocs={allocs} teams={teams}/>}
+          {view==="teams"      && <Teams      user={user} teams={teams} setTeams={setTeams} employees={employees} setEmployees={setEmployees}/>}
+          {view==="leaves"     && <Leaves     user={user} employees={employees} leaves={leaves} setLeaves={setLeaves}/>}
+          {view==="timesheets" && (
             <div style={{ display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",padding:80 }}>
-              <div style={{ fontSize:48, marginBottom:16 }}>🔗</div>
-              <h2 style={{ fontSize:22,fontWeight:800,color:TEXT,margin:"0 0 8px" }}>Jira Integration</h2>
-              <p style={{ fontSize:14,color:MUTED,margin:"0 0 24px",textAlign:"center",maxWidth:360 }}>
-                Jira sync is on the roadmap. Once connected, projects and issues will automatically import into ResTrack.
+              <div style={{ fontSize:48,marginBottom:16 }}>⏱️</div>
+              <h2 style={{ fontSize:22,fontWeight:800,color:TEXT,margin:"0 0 8px" }}>Timesheets</h2>
+              <p style={{ fontSize:14,color:MUTED,textAlign:"center",maxWidth:380 }}>
+                Full timesheet workflow with submission and approval is coming in Phase 2. Stay tuned!
               </p>
-              <span style={{ background:"#FEF3C7",color:"#92400E",borderRadius:999,padding:"6px 18px",fontSize:13,fontWeight:600 }}>Coming Soon</span>
+              <span style={{ background:"#DBEAFE",color:"#1E40AF",borderRadius:999,padding:"6px 18px",fontSize:13,fontWeight:600,marginTop:16 }}>Phase 2</span>
             </div>
           )}
+          {view==="profile"    && <Profile    user={user} setUser={setUser}/>}
         </main>
       </div>
     </>
