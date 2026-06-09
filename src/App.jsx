@@ -410,7 +410,7 @@ function Timesheets({user,employees,projects,allocs,entries,setEntries,timesheet
         <div>
           <Card style={{marginBottom:14}}>
             <div style={{fontSize:11,fontWeight:700,color:MUTED,textTransform:"uppercase",letterSpacing:.5,marginBottom:10}}>Week</div>
-            {/* Main nav */}
+            {/* Prev / week label / Next */}
             <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:8}}>
               <button onClick={()=>setWeek(addWeeks(week,-1))} style={{width:34,height:34,borderRadius:8,border:"1px solid "+BORDER,background:WHITE,cursor:"pointer",fontSize:15,display:"flex",alignItems:"center",justifyContent:"center",color:TEXT,fontWeight:700}}>{"<"}</button>
               <div style={{flex:1,textAlign:"center"}}>
@@ -420,19 +420,39 @@ function Timesheets({user,employees,projects,allocs,entries,setEntries,timesheet
               <button onClick={()=>setWeek(addWeeks(week,1))} disabled={!isStaff&&week>=cw} style={{width:34,height:34,borderRadius:8,border:"1px solid "+BORDER,background:(!isStaff&&week>=cw)?"#F8FAFC":WHITE,cursor:(!isStaff&&week>=cw)?"not-allowed":"pointer",fontSize:15,display:"flex",alignItems:"center",justifyContent:"center",color:(!isStaff&&week>=cw)?"#CBD5E1":TEXT,fontWeight:700}}>{">"}</button>
             </div>
             {week!==cw&&<button onClick={()=>setWeek(cw)} style={{width:"100%",padding:"6px",background:"#F0FDF9",border:"1px solid "+TEAL+"44",borderRadius:7,color:TEAL,fontSize:12,fontWeight:600,cursor:"pointer",marginBottom:10}}>Jump to Current Week</button>}
-            {/* Year quick-nav (admin/manager) */}
+
+            {/* Direct week entry for admin/manager */}
             {isStaff&&<>
-              <div style={{fontSize:11,fontWeight:700,color:MUTED,textTransform:"uppercase",letterSpacing:.5,marginBottom:6}}>Jump to Year</div>
-              <div style={{display:"flex",gap:5,flexWrap:"wrap",marginBottom:10}}>
-                {[parseInt(cw)-2,parseInt(cw)-1,parseInt(cw),parseInt(cw)+1].map(y=>{
-                  const yr=String(y).slice(0,4);
-                  return <button key={y} onClick={()=>setWeek(yr+"-W01")} style={{flex:1,padding:"5px 4px",borderRadius:6,border:"1px solid "+BORDER,background:week.startsWith(yr)?TEAL:WHITE,color:week.startsWith(yr)?"#fff":TEXT,fontSize:12,fontWeight:600,cursor:"pointer"}}>{yr}</button>;
-                })}
+              <div style={{fontSize:11,fontWeight:700,color:MUTED,textTransform:"uppercase",letterSpacing:.5,marginBottom:5}}>Go to Specific Week</div>
+              <div style={{display:"flex",gap:6,marginBottom:10}}>
+                <input
+                  type="number" placeholder="Year e.g. 2024"
+                  defaultValue={parseInt(week.split("-W")[0])}
+                  id="ts-year-input"
+                  style={{flex:2,padding:"7px 10px",border:"1px solid "+BORDER,borderRadius:6,fontSize:13,width:"100%"}}
+                />
+                <input
+                  type="number" placeholder="Wk 1-52" min={1} max={52}
+                  defaultValue={parseInt(week.split("-W")[1])}
+                  id="ts-week-input"
+                  style={{flex:1,padding:"7px 10px",border:"1px solid "+BORDER,borderRadius:6,fontSize:13,width:"100%"}}
+                />
+                <button onClick={()=>{
+                  const y=document.getElementById("ts-year-input").value;
+                  const w2=document.getElementById("ts-week-input").value;
+                  if(y&&w2&&+y>2000&&+w2>=1&&+w2<=53)setWeek(y+"-W"+String(w2).padStart(2,"0"));
+                }} style={{padding:"7px 12px",borderRadius:6,border:"none",background:TEAL,color:"#fff",fontSize:12,fontWeight:700,cursor:"pointer",whiteSpace:"nowrap"}}>Go</button>
+              </div>
+              {/* Year quick-jump */}
+              <div style={{fontSize:11,fontWeight:700,color:MUTED,textTransform:"uppercase",letterSpacing:.5,marginBottom:5}}>Year</div>
+              <div style={{display:"flex",gap:4,marginBottom:10}}>
+                {["2023","2024","2025","2026","2027"].map(yr=><button key={yr} onClick={()=>setWeek(yr+"-W01")} style={{flex:1,padding:"5px 2px",borderRadius:6,border:"1px solid "+BORDER,background:week.startsWith(yr)?TEAL:WHITE,color:week.startsWith(yr)?"#fff":TEXT,fontSize:11,fontWeight:600,cursor:"pointer"}}>{yr}</button>)}
               </div>
             </>}
-            {/* Recent weeks */}
-            <div style={{fontSize:11,fontWeight:700,color:MUTED,textTransform:"uppercase",letterSpacing:.5,marginBottom:6}}>Quick Pick</div>
-            {[addWeeks(cw,-2),addWeeks(cw,-1),cw,addWeeks(cw,1)].map(w=>{
+
+            {/* Quick Pick */}
+            <div style={{fontSize:11,fontWeight:700,color:MUTED,textTransform:"uppercase",letterSpacing:.5,marginBottom:5}}>Quick Pick</div>
+            {[addWeeks(cw,-3),addWeeks(cw,-2),addWeeks(cw,-1),cw,addWeeks(cw,1)].map(w=>{
               const wts=timesheets.find(t=>t.empId===user.employeeId&&t.week===w);
               const wst=wts?.status||"none";
               return <div key={w} onClick={()=>setWeek(w)} style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"6px 8px",borderRadius:6,cursor:"pointer",background:week===w?"#F0FDF9":WHITE,border:"1px solid "+(week===w?TEAL+"55":BORDER),marginBottom:4}}>
@@ -1141,19 +1161,45 @@ export default function App(){
   async function loadAll(authUser){
     setDataLoading(true);
     let{data:profile}=await sb.from("app_users").select("*").eq("id",authUser.id).single();
-    // Fallback: create profile from auth metadata if missing
+
+    // ── Step 1: Create profile if it doesn't exist ──
     if(!profile){
       const meta=authUser.user_metadata||{};
       let empId=null;
-      // Try to find or create employee record
       const{data:existEmp}=await sb.from("employees").select("id").eq("email",authUser.email).single();
       if(existEmp){empId=existEmp.id;}
       else{const{data:newEmp}=await sb.from("employees").insert({name:meta.name||authUser.email?.split("@")[0]||"User",email:authUser.email,department:"Management",role:"Administrator",capacity:40,active:true}).select().single();if(newEmp)empId=newEmp.id;}
-      await sb.from("app_users").upsert({id:authUser.id,name:meta.name||authUser.email?.split("@")[0]||"User",email:authUser.email,role:meta.role||"admin",employee_id:empId,is_active:true,avatar_color:TEAL},{onConflict:"id"});
-      const{data:newProfile}=await sb.from("app_users").select("*").eq("id",authUser.id).single();
-      profile=newProfile;
+      await sb.from("app_users").upsert({id:authUser.id,name:meta.name||authUser.email?.split("@")[0]||"User",email:authUser.email,role:"admin",employee_id:empId,is_active:true,avatar_color:TEAL},{onConflict:"id"});
+      const{data:np}=await sb.from("app_users").select("*").eq("id",authUser.id).single();
+      profile=np;
     }
-    const u={id:authUser.id,email:authUser.email,name:profile?.name||authUser.user_metadata?.name||authUser.email?.split("@")[0]||"User",role:profile?.role||authUser.user_metadata?.role||"user",teamId:profile?.team_id||null,employeeId:profile?.employee_id||null,avatarColor:profile?.avatar_color||TEAL,phone:profile?.phone||""};
+
+    // ── Step 2: If role is not admin, check if ANY admin exists - if not, promote this user ──
+    if(profile && profile.role!=="admin"){
+      const{count:adminCount}=await sb.from("app_users").select("id",{count:"exact",head:true}).eq("role","admin");
+      if((adminCount||0)===0){
+        await sb.from("app_users").update({role:"admin"}).eq("id",authUser.id);
+        profile={...profile,role:"admin"};
+      }
+    }
+
+    // ── Step 3: If employee_id is null, auto-link by email ──
+    if(profile && !profile.employee_id){
+      const{data:empByEmail}=await sb.from("employees").select("id").eq("email",authUser.email).single();
+      if(empByEmail){
+        await sb.from("app_users").update({employee_id:empByEmail.id}).eq("id",authUser.id);
+        profile={...profile,employee_id:empByEmail.id};
+      } else {
+        // Create employee record for this admin
+        const{data:newEmp}=await sb.from("employees").insert({name:profile.name||authUser.email?.split("@")[0]||"Admin",email:authUser.email,department:"Management",role:"Administrator",capacity:40,active:true}).select().single();
+        if(newEmp){
+          await sb.from("app_users").update({employee_id:newEmp.id}).eq("id",authUser.id);
+          profile={...profile,employee_id:newEmp.id};
+        }
+      }
+    }
+
+    const u={id:authUser.id,email:authUser.email,name:profile?.name||authUser.user_metadata?.name||authUser.email?.split("@")[0]||"User",role:profile?.role||"user",teamId:profile?.team_id||null,employeeId:profile?.employee_id||null,avatarColor:profile?.avatar_color||TEAL,phone:profile?.phone||""};
     setUser(u);
     const isAdmin=u.role==="admin",isManager=u.role==="manager";
     const[empR,projR,allocR,entryR,leaveR,teamR,memberR,tsR,notifR,appUR]=await Promise.all([sb.from("employees").select("*").order("name"),sb.from("projects").select("*").order("name"),sb.from("allocations").select("*"),sb.from("time_entries").select("*"),sb.from("leaves").select("*").order("created_at",{ascending:false}),sb.from("teams").select("*").order("name"),sb.from("team_members").select("*"),sb.from("timesheets").select("*"),sb.from("notifications").select("*").eq("user_id",authUser.id).order("created_at",{ascending:false}).limit(30),sb.from("app_users").select("id,role,employee_id")]);
