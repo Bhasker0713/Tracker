@@ -1010,26 +1010,6 @@ function Employees({user,employees,setEmployees,allocs,teams}){
     setImporting(false);if(ok2>0)setOk(ok2+" employee(s) imported and invited.");if(fail>0)setErr(fail+" row(s) failed - check emails and format.");
   };const [fDept,setFDept]=useState("");
   const blank={name:"",email:"",role:"user",department:"",jobTitle:"",capacity:"40",teamId:"",phone:""};const [form,setForm]=useState(blank);const F=k=>e=>setForm(p=>({...p,[k]:e.target.value}));
-  const [importing,setImporting]=useState(false);
-  const downloadTemplate=()=>csvDownload([{name:"Jane Smith",email:"jane@company.com",role:"user",department:"Engineering",jobTitle:"Developer",capacity:40,phone:""}],"employee-import-template.csv");
-  const importCSV=async(file)=>{
-    if(!file)return;setImporting(true);setErr("");setOk("");
-    const text=await file.text();
-    const rows=text.trim().split("\n").slice(1); // skip header
-    let success=0,failed=0;
-    for(const row of rows){
-      const cols=row.split(",").map(c=>c.replace(/^"|"$/g,"").trim());
-      const [name,email,role,department,jobTitle,capacity,phone]=cols;
-      if(!name||!email){failed++;continue;}
-      try{
-        const res=await fetch("/api/invite",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({name,email,role:role||"user",department,jobTitle,capacity:+capacity||40,phone})});
-        if(res.ok)success++;else failed++;
-      }catch{failed++;}
-    }
-    setImporting(false);
-    if(success>0)setOk(success+" employee(s) imported and invited.");
-    if(failed>0)setErr(failed+" row(s) failed - check emails and format.");
-  };
   const depts=[...new Set(employees.map(e=>e.dept))].filter(Boolean);
   const filtered=employees.filter(e=>{const q=search.toLowerCase();return(!q||(e.name||"").toLowerCase().includes(q)||(e.email||"").toLowerCase().includes(q))&&(!fDept||e.dept===fDept);});
   const sendInvite=async()=>{if(!form.name||!form.email){setErr("Name and email required.");return;}setLoading(true);setErr("");setOk("");try{const res=await fetch("/api/invite",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({name:form.name,email:form.email,role:form.role,department:form.department,jobTitle:form.jobTitle,capacity:+form.capacity||40,teamId:form.teamId||null,phone:form.phone})});const data=await res.json();if(!res.ok)throw new Error(data.error||"Invite failed");setEmployees(prev=>[...prev,{id:data.employeeId||Date.now(),name:form.name,email:form.email,dept:form.department,role:form.jobTitle,capacity:+form.capacity||40,active:true,teamId:form.teamId||null,color:AVA_COLORS[employees.length%AVA_COLORS.length],appRole:form.role}]);setOk("Invite sent to "+form.email);setForm(blank);setShowInvite(false);}catch(e){setErr(e.message);}finally{setLoading(false);}};
