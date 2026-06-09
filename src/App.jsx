@@ -234,8 +234,43 @@ function LoginPage(){
 }
 
 
-function Dashboard({user,employees,projects,allocs,entries,leaves,timesheets,teams,setView}){
+function ClaimAdminBanner({userId,onClaim,claiming}){
+  const [noAdmins,setNoAdmins]=useState(null);
+  useEffect(()=>{
+    sb.from("app_users").select("id",{count:"exact",head:true}).eq("role","admin")
+      .then(({count})=>setNoAdmins((count||0)===0));
+  },[]);
+  if(!noAdmins) return null;
+  return(
+    <div style={{padding:"16px 20px",background:"#FFF7ED",border:"2px solid #F59E0B",borderRadius:12,marginBottom:20,display:"flex",alignItems:"center",gap:16}}>
+      <span style={{fontSize:28}}>🔑</span>
+      <div style={{flex:1}}>
+        <div style={{fontSize:15,fontWeight:700,color:"#92400E",marginBottom:3}}>No admin account is set up yet</div>
+        <div style={{fontSize:13,color:"#B45309"}}>You are currently logged in as a regular User. Since no admin exists in this workspace, you can claim admin access now.</div>
+      </div>
+      <button onClick={onClaim} disabled={claiming} style={{padding:"10px 20px",background:"#F59E0B",border:"none",borderRadius:8,color:"#fff",fontSize:14,fontWeight:700,cursor:claiming?"not-allowed":"pointer",opacity:claiming?0.7:1,whiteSpace:"nowrap"}}>
+        {claiming?"Claiming...":"Claim Admin Access"}
+      </button>
+    </div>
+  );
+}
+
+function Dashboard({user,employees,projects,allocs,entries,leaves,timesheets,teams,setView,setUser}){
   const isAdmin=user.role==="admin",isManager=user.role==="manager";
+  const [claiming,setClaiming]=useState(false);
+
+  const claimAdmin=async()=>{
+    setClaiming(true);
+    const{count}=await sb.from("app_users").select("id",{count:"exact",head:true}).eq("role","admin");
+    if((count||0)===0){
+      await sb.from("app_users").update({role:"admin"}).eq("id",user.id);
+      // Force page reload so nav rebuilds with admin role
+      window.location.reload();
+    } else {
+      alert("An admin account already exists. Ask your admin to change your role.");
+      setClaiming(false);
+    }
+  };
   const WEEKS=recentWeeks(6),week=currentWeek();
   const visEmps=isAdmin?employees:isManager?employees.filter(e=>e.teamId===user.teamId||e.managerId===user.employeeId):employees.filter(e=>e.id===user.employeeId);
   const stats=visEmps.filter(e=>e.active).map(e=>{const logged=entries.filter(en=>en.empId===e.id&&en.week===week).reduce((s,en)=>s+en.hours,0);return{...e,logged,util:e.capacity>0?Math.round((logged/e.capacity)*100):0};});
@@ -247,6 +282,9 @@ function Dashboard({user,employees,projects,allocs,entries,leaves,timesheets,tea
   return(
     <div>
       <div style={{marginBottom:20}}><h1 style={{fontSize:22,fontWeight:800,color:TEXT,margin:"0 0 3px"}}>{isAdmin?"Company Overview":isManager?"Team Overview":"My Dashboard"}</h1><p style={{color:MUTED,fontSize:13,margin:0}}>Week {week} - Welcome, {user.name?.split(" ")[0]}</p></div>
+
+      {/* Claim admin banner - only shows if user role AND no admins exist */}
+      {!isAdmin&&!isManager&&<ClaimAdminBanner userId={user.id} onClaim={claimAdmin} claiming={claiming}/>}
       {!isAdmin&&!isManager&&myTs&&<div style={{padding:"12px 16px",background:TS_STATUS[myTs.status]?.bg||"#F1F5F9",border:"1px solid "+BORDER,borderRadius:10,marginBottom:16,display:"flex",alignItems:"center",gap:12}}>
         <span style={{fontSize:20}}>{TS_STATUS[myTs.status]?.icon}</span>
         <div style={{flex:1}}><span style={{fontSize:13,fontWeight:600,color:TS_STATUS[myTs.status]?.fg}}>{TS_STATUS[myTs.status]?.label}</span><span style={{fontSize:13,color:MUTED}}> - Timesheet for {week} ({myTs.totalHours}h)</span>{myTs.comment&&<div style={{fontSize:12,color:MUTED,marginTop:2}}>Comment: {myTs.comment}</div>}</div>
@@ -1277,7 +1315,7 @@ export default function App(){
           </div>
         </aside>
         <main style={{flex:1,padding:28,overflowX:"hidden",maxWidth:"calc(100vw - 232px)"}}>
-          {view==="dashboard"   &&<Dashboard    user={user} employees={employees} projects={projects} allocs={allocs} entries={entries} leaves={leaves} timesheets={timesheets} teams={teams} setView={setView}/>}
+          {view==="dashboard"   &&<Dashboard    user={user} employees={employees} projects={projects} allocs={allocs} entries={entries} leaves={leaves} timesheets={timesheets} teams={teams} setView={setView} setUser={setUser}/>}
           {view==="employees"   &&<Employees    user={user} employees={employees} setEmployees={setEmployees} allocs={allocs} teams={teams}/>}
           {view==="teams"       &&<Teams        user={user} teams={teams} setTeams={setTeams} employees={employees} setEmployees={setEmployees}/>}
           {view==="projects"    &&<Projects     user={user} projects={projects} setProjects={setProjects} allocs={allocs} setAllocs={setAllocs} employees={employees} entries={entries}/>}
