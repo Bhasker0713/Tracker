@@ -71,19 +71,65 @@ function Alrt({type,msg}){if(!msg)return null;const s={error:{bg:"#FEF2F2",bdr:"
 
 
 function LoginPage(){
-  const [mode,setMode]=useState("login");
+  const [mode,setMode]=useState("login"); // login | signup | forgot | setpwd
+  const [name,setName]=useState("");
   const [email,setEmail]=useState("");const [pwd,setPwd]=useState("");
-  const [newPwd,setNewPwd]=useState("");const [confirm,setConfirm]=useState("");
+  const [confirm,setConfirm]=useState("");
+  const [newPwd,setNewPwd]=useState("");const [newConfirm,setNewConfirm]=useState("");
   const [loading,setLoading]=useState(false);
   const [msg,setMsg]=useState({type:"",text:""});
   useEffect(()=>{if(window.location.hash.includes("type=invite")||window.location.hash.includes("type=recovery"))setMode("setpwd");},[]);
   const err=t=>setMsg({type:"error",text:t}),good=t=>setMsg({type:"ok",text:t});
-  const doLogin=async e=>{e.preventDefault();if(!email||!pwd)return err("Email and password required.");setLoading(true);setMsg({type:"",text:""});const{error}=await sb.auth.signInWithPassword({email,password:pwd});setLoading(false);if(error)err(error.message);};
-  const doForgot=async e=>{e.preventDefault();if(!email)return err("Enter your email.");setLoading(true);const{error}=await sb.auth.resetPasswordForEmail(email,{redirectTo:window.location.origin});setLoading(false);if(error)err(error.message);else{good("Reset link sent.");setTimeout(()=>setMode("login"),3000);}};
-  const doSetPwd=async e=>{e.preventDefault();if(!newPwd||newPwd.length<8)return err("Min 8 characters.");if(newPwd!==confirm)return err("Passwords do not match.");setLoading(true);const{error}=await sb.auth.updateUser({password:newPwd});setLoading(false);if(error)err(error.message);else{good("Password set!");window.location.hash="";}};
+
+  const doLogin=async e=>{
+    e.preventDefault();if(!email||!pwd)return err("Email and password required.");
+    setLoading(true);setMsg({type:"",text:""});
+    const{error}=await sb.auth.signInWithPassword({email,password:pwd});
+    setLoading(false);if(error)err(error.message);
+  };
+
+  const doSignUp=async e=>{
+    e.preventDefault();
+    if(!name.trim())return err("Full name is required.");
+    if(!email)return err("Email is required.");
+    if(!pwd||pwd.length<8)return err("Password must be at least 8 characters.");
+    if(pwd!==confirm)return err("Passwords do not match.");
+    setLoading(true);setMsg({type:"",text:""});
+    // Check if this is the first user (gets admin)
+    const{count}=await sb.from("app_users").select("id",{count:"exact",head:true});
+    const role=count===0?"admin":"user";
+    // Create auth account
+    const{data:authData,error:authErr}=await sb.auth.signUp({email,password:pwd,options:{data:{name}}});
+    if(authErr){setLoading(false);return err(authErr.message);}
+    const authId=authData.user?.id;
+    if(authId){
+      // Create employee record
+      const{data:emp}=await sb.from("employees").insert({name:name.trim(),email,department:"Management",role:"Administrator",capacity:40,active:true}).select().single();
+      // Create app_users profile
+      await sb.from("app_users").upsert({id:authId,name:name.trim(),email,role,employee_id:emp?.id||null,is_active:true,avatar_color:TEAL},{onConflict:"id"});
+    }
+    setLoading(false);
+    good("Account created! Check your email to confirm, then sign in.");
+    setTimeout(()=>setMode("login"),3500);
+  };
+
+  const doForgot=async e=>{
+    e.preventDefault();if(!email)return err("Enter your email.");setLoading(true);
+    const{error}=await sb.auth.resetPasswordForEmail(email,{redirectTo:window.location.origin});
+    setLoading(false);if(error)err(error.message);else{good("Reset link sent. Check your inbox.");setTimeout(()=>setMode("login"),3000);}
+  };
+  const doSetPwd=async e=>{
+    e.preventDefault();if(!newPwd||newPwd.length<8)return err("Min 8 characters.");
+    if(newPwd!==newConfirm)return err("Passwords do not match.");setLoading(true);
+    const{error}=await sb.auth.updateUser({password:newPwd});setLoading(false);
+    if(error)err(error.message);else{good("Password set!");window.location.hash="";}
+  };
+
   const features=["Role-based access for Admin, Manager and User","Weekly timesheet submission and approval workflow","Team-based resource utilization tracking","Leave management with manager approval","Real-time heatmap and utilization reports"];
+
   return(
     <div style={{display:"flex",height:"100vh",fontFamily:"'Segoe UI',system-ui,sans-serif"}}>
+      {/* Left branding panel */}
       <div style={{width:"44%",background:NAV,display:"flex",flexDirection:"column",justifyContent:"center",padding:"56px 48px",flexShrink:0}}>
         <div style={{display:"flex",alignItems:"center",gap:12,marginBottom:44}}>
           <div style={{width:46,height:46,borderRadius:13,background:TEAL,display:"flex",alignItems:"center",justifyContent:"center",fontWeight:900,fontSize:22,color:NAV}}>R</div>
@@ -98,41 +144,83 @@ function LoginPage(){
           </div>)}
         </div>
       </div>
+
+      {/* Right form panel */}
       <div style={{flex:1,display:"flex",alignItems:"center",justifyContent:"center",background:"#F8FAFC",padding:40}}>
-        <div style={{width:"100%",maxWidth:400}}>
+        <div style={{width:"100%",maxWidth:420}}>
+
+          {/* Mode switcher tabs */}
+          {(mode==="login"||mode==="signup")&&(
+            <div style={{display:"flex",background:"#F1F5F9",borderRadius:10,padding:4,marginBottom:28}}>
+              {[{id:"login",label:"Sign In"},{id:"signup",label:"Create Account"}].map(t=>(
+                <button key={t.id} onClick={()=>{setMode(t.id);setMsg({type:"",text:""}); }} style={{flex:1,padding:"9px",borderRadius:7,border:"none",cursor:"pointer",background:mode===t.id?WHITE:"transparent",color:mode===t.id?TEXT:MUTED,fontSize:13,fontWeight:mode===t.id?600:400,boxShadow:mode===t.id?"0 1px 4px #0000000f":"none",transition:"all .15s"}}>{t.label}</button>
+              ))}
+            </div>
+          )}
+
+          {/* LOGIN */}
           {mode==="login"&&<>
-            <h2 style={{fontSize:26,fontWeight:800,color:TEXT,margin:"0 0 6px"}}>Welcome back</h2>
-            <p style={{fontSize:14,color:MUTED,margin:"0 0 28px"}}>Sign in to your ResTrack account</p>
+            <h2 style={{fontSize:24,fontWeight:800,color:TEXT,margin:"0 0 6px"}}>Welcome back</h2>
+            <p style={{fontSize:14,color:MUTED,margin:"0 0 24px"}}>Sign in to your ResTrack account</p>
             <Alrt type={msg.type} msg={msg.text}/>
             <form onSubmit={doLogin}>
               <Inp label="Work Email" type="email" value={email} onChange={e=>setEmail(e.target.value)} placeholder="you@company.com" required/>
               <Inp label="Password"   type="password" value={pwd} onChange={e=>setPwd(e.target.value)} placeholder="Your password" required/>
               <Btn primary full disabled={loading} style={{padding:"13px",fontSize:15,marginTop:4}}>{loading?<><Spin/>Signing in...</>:"Sign In"}</Btn>
             </form>
-            <button onClick={()=>{setMode("forgot");setMsg({type:"",text:""});}} style={{marginTop:16,fontSize:13,color:MUTED,background:"none",border:"none",cursor:"pointer",display:"block",width:"100%",textAlign:"center"}}>Forgot password?</button>
-            <div style={{marginTop:28,padding:"14px 16px",background:WHITE,borderRadius:10,border:"1px solid "+BORDER,fontSize:13,color:MUTED,textAlign:"center",lineHeight:1.6}}>New to ResTrack? Check your email for an invite from your admin.</div>
+            <button onClick={()=>{setMode("forgot");setMsg({type:"",text:""});}} style={{marginTop:14,fontSize:13,color:MUTED,background:"none",border:"none",cursor:"pointer",display:"block",width:"100%",textAlign:"center"}}>Forgot your password?</button>
+            <div style={{marginTop:20,padding:"12px 16px",background:WHITE,borderRadius:10,border:"1px solid "+BORDER,fontSize:13,color:MUTED,textAlign:"center",lineHeight:1.6}}>
+              Already have an account from an invite?<br/>Sign in above with your email and password.
+            </div>
           </>}
-          {mode==="forgot"&&<>
-            <button onClick={()=>setMode("login")} style={{fontSize:13,color:MUTED,background:"none",border:"none",cursor:"pointer",marginBottom:22}}>Back to sign in</button>
-            <h2 style={{fontSize:24,fontWeight:800,color:TEXT,margin:"0 0 6px"}}>Reset password</h2>
+
+          {/* SIGN UP */}
+          {mode==="signup"&&<>
+            <h2 style={{fontSize:24,fontWeight:800,color:TEXT,margin:"0 0 6px"}}>Create your account</h2>
+            <p style={{fontSize:14,color:MUTED,margin:"0 0 20px"}}>Set up the first admin account for your organization.</p>
+            <div style={{padding:"10px 14px",background:"#EFF6FF",border:"1px solid #BFDBFE",borderRadius:8,fontSize:13,color:"#1D4ED8",marginBottom:16,lineHeight:1.5}}>
+              The first account created is automatically set as <strong>Admin</strong>. Use this to set up your workspace, then invite your team.
+            </div>
             <Alrt type={msg.type} msg={msg.text}/>
-            <form onSubmit={doForgot}><Inp label="Work Email" type="email" value={email} onChange={e=>setEmail(e.target.value)} placeholder="you@company.com" required/><Btn primary full disabled={loading}>{loading?<><Spin/>Sending...</>:"Send Reset Link"}</Btn></form>
-          </>}
-          {mode==="setpwd"&&<>
-            <h2 style={{fontSize:24,fontWeight:800,color:TEXT,margin:"0 0 6px"}}>Set your password</h2>
-            <p style={{fontSize:14,color:MUTED,margin:"0 0 24px"}}>Choose a secure password to complete your setup.</p>
-            <Alrt type={msg.type} msg={msg.text}/>
-            <form onSubmit={doSetPwd}>
-              <Inp label="New Password" type="password" value={newPwd} onChange={e=>setNewPwd(e.target.value)} placeholder="At least 8 characters" required/>
-              <Inp label="Confirm"      type="password" value={confirm} onChange={e=>setConfirm(e.target.value)} placeholder="Repeat password" required/>
-              <Btn primary full disabled={loading}>{loading?<><Spin/>Setting...</>:"Set Password and Sign In"}</Btn>
+            <form onSubmit={doSignUp}>
+              <Inp label="Full Name"        value={name}    onChange={e=>setName(e.target.value)}    placeholder="Your full name"   required/>
+              <Inp label="Work Email"       type="email" value={email}    onChange={e=>setEmail(e.target.value)}   placeholder="you@company.com"  required/>
+              <Inp label="Password"         type="password" value={pwd}     onChange={e=>setPwd(e.target.value)}    placeholder="Min 8 characters" required/>
+              <Inp label="Confirm Password" type="password" value={confirm} onChange={e=>setConfirm(e.target.value)} placeholder="Repeat password"  required/>
+              <Btn primary full disabled={loading} style={{padding:"13px",fontSize:15,marginTop:4}}>{loading?<><Spin/>Creating account...</>:"Create Account"}</Btn>
             </form>
           </>}
+
+          {/* FORGOT PASSWORD */}
+          {mode==="forgot"&&<>
+            <button onClick={()=>setMode("login")} style={{fontSize:13,color:MUTED,background:"none",border:"none",cursor:"pointer",marginBottom:22,display:"flex",alignItems:"center",gap:4}}>Back to sign in</button>
+            <h2 style={{fontSize:24,fontWeight:800,color:TEXT,margin:"0 0 6px"}}>Reset password</h2>
+            <p style={{fontSize:14,color:MUTED,margin:"0 0 24px"}}>Enter your work email and we will send a reset link.</p>
+            <Alrt type={msg.type} msg={msg.text}/>
+            <form onSubmit={doForgot}>
+              <Inp label="Work Email" type="email" value={email} onChange={e=>setEmail(e.target.value)} placeholder="you@company.com" required/>
+              <Btn primary full disabled={loading}>{loading?<><Spin/>Sending...</>:"Send Reset Link"}</Btn>
+            </form>
+          </>}
+
+          {/* SET PASSWORD (invite/recovery flow) */}
+          {mode==="setpwd"&&<>
+            <h2 style={{fontSize:24,fontWeight:800,color:TEXT,margin:"0 0 6px"}}>Set your password</h2>
+            <p style={{fontSize:14,color:MUTED,margin:"0 0 24px"}}>Choose a secure password to complete your account setup.</p>
+            <Alrt type={msg.type} msg={msg.text}/>
+            <form onSubmit={doSetPwd}>
+              <Inp label="New Password"     type="password" value={newPwd}     onChange={e=>setNewPwd(e.target.value)}     placeholder="At least 8 characters" required/>
+              <Inp label="Confirm Password" type="password" value={newConfirm} onChange={e=>setNewConfirm(e.target.value)} placeholder="Repeat password" required/>
+              <Btn primary full disabled={loading} style={{padding:"13px",fontSize:15,marginTop:4}}>{loading?<><Spin/>Setting...</>:"Set Password and Sign In"}</Btn>
+            </form>
+          </>}
+
         </div>
       </div>
     </div>
   );
 }
+
 
 function Dashboard({user,employees,projects,allocs,entries,leaves,timesheets,teams,setView}){
   const isAdmin=user.role==="admin",isManager=user.role==="manager";
