@@ -1015,8 +1015,7 @@ function Employees({user,employees,setEmployees,allocs,teams}){
   const importCSV=async(file)=>{
     if(!file)return;setImporting(true);setErr("");setOk("");
     const text=await file.text();
-    const rows=text.trim().split("
-").slice(1); // skip header
+    const rows=text.trim().split("\n").slice(1); // skip header
     let success=0,failed=0;
     for(const row of rows){
       const cols=row.split(",").map(c=>c.replace(/^"|"$/g,"").trim());
