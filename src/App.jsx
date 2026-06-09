@@ -95,22 +95,29 @@ function LoginPage(){
     if(!pwd||pwd.length<8)return err("Password must be at least 8 characters.");
     if(pwd!==confirm)return err("Passwords do not match.");
     setLoading(true);setMsg({type:"",text:""});
-    // Check if this is the first user (gets admin)
-    const{count}=await sb.from("app_users").select("id",{count:"exact",head:true});
-    const role=count===0?"admin":"user";
-    // Create auth account
-    const{data:authData,error:authErr}=await sb.auth.signUp({email,password:pwd,options:{data:{name}}});
+    // Always admin for Create Account flow (first-admin setup)
+    const role="admin";
+    // Create auth account - store role+name in metadata as fallback
+    const{data:authData,error:authErr}=await sb.auth.signUp({
+      email,password:pwd,
+      options:{data:{name:name.trim(),role:"admin"},emailRedirectTo:window.location.origin}
+    });
     if(authErr){setLoading(false);return err(authErr.message);}
     const authId=authData.user?.id;
     if(authId){
       // Create employee record
-      const{data:emp}=await sb.from("employees").insert({name:name.trim(),email,department:"Management",role:"Administrator",capacity:40,active:true}).select().single();
-      // Create app_users profile
-      await sb.from("app_users").upsert({id:authId,name:name.trim(),email,role,employee_id:emp?.id||null,is_active:true,avatar_color:TEAL},{onConflict:"id"});
+      const{data:emp}=await sb.from("employees")
+        .insert({name:name.trim(),email,department:"Management",role:"Administrator",capacity:40,active:true})
+        .select().single();
+      // Create app_users profile (may fail until email confirmed - loadAll handles fallback)
+      await sb.from("app_users").upsert(
+        {id:authId,name:name.trim(),email,role:"admin",employee_id:emp?.id||null,is_active:true,avatar_color:TEAL},
+        {onConflict:"id"}
+      );
     }
     setLoading(false);
-    good("Account created! Check your email to confirm, then sign in.");
-    setTimeout(()=>setMode("login"),3500);
+    good("Account created! Check your email, confirm the link, then sign in here.");
+    setTimeout(()=>setMode("login"),4000);
   };
 
   const doForgot=async e=>{
@@ -327,14 +334,29 @@ function Timesheets({user,employees,projects,allocs,entries,setEntries,timesheet
       <div style={{display:"grid",gridTemplateColumns:"260px 1fr",gap:16}}>
         <div>
           <Card style={{marginBottom:14}}>
-            <SecHd title="Select Week"/>
-            <div style={{display:"flex",flexDirection:"column",gap:5}}>
-              {WEEKS.map(w=>{const wts=timesheets.find(t=>t.empId===user.employeeId&&t.week===w);const wst=wts?.status||"none";return(
-                <button key={w} onClick={()=>setWeek(w)} style={{padding:"9px 12px",borderRadius:8,border:"1px solid "+(week===w?TEAL:BORDER),background:week===w?TEAL:WHITE,color:week===w?"#fff":TEXT,fontSize:13,fontWeight:week===w?700:400,cursor:"pointer",textAlign:"left",display:"flex",alignItems:"center",justifyContent:"space-between"}}>
-                  <span>{w}</span>
-                  {wst!=="none"&&<span style={{fontSize:10,background:TS_STATUS[wst]?.bg,color:TS_STATUS[wst]?.fg,borderRadius:4,padding:"1px 6px",fontWeight:700}}>{TS_STATUS[wst]?.label}</span>}
-                </button>
-              );})}
+            {/* Compact week navigator */}
+            <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:8}}>
+              <button onClick={()=>setWeek(addWeeks(week,-1))} style={{width:34,height:34,borderRadius:8,border:"1px solid "+BORDER,background:WHITE,cursor:"pointer",fontSize:16,display:"flex",alignItems:"center",justifyContent:"center",color:MUTED,fontWeight:700}}>{"<"}</button>
+              <div style={{textAlign:"center",flex:1}}>
+                <div style={{fontSize:15,fontWeight:800,color:TEXT}}>{week}</div>
+                <div style={{fontSize:11,color:week===currentWeek()?TEAL:MUTED,fontWeight:week===currentWeek()?700:400}}>{week===currentWeek()?"This week":"Past week"}</div>
+              </div>
+              <button onClick={()=>setWeek(addWeeks(week,1))} disabled={week>=currentWeek()} style={{width:34,height:34,borderRadius:8,border:"1px solid "+BORDER,background:week>=currentWeek()?"#F8FAFC":WHITE,cursor:week>=currentWeek()?"not-allowed":"pointer",fontSize:16,display:"flex",alignItems:"center",justifyContent:"center",color:week>=currentWeek()?"#CBD5E1":MUTED,fontWeight:700}}>{">"}</button>
+            </div>
+            {week!==currentWeek()&&<button onClick={()=>setWeek(currentWeek())} style={{width:"100%",padding:"6px",background:"#F0FDF9",border:"1px solid "+TEAL+"44",borderRadius:7,color:TEAL,fontSize:12,fontWeight:600,cursor:"pointer",marginBottom:8}}>Jump to Current Week</button>}
+            {/* Recent weeks status overview */}
+            <div style={{borderTop:"1px solid "+BORDER,paddingTop:10,marginTop:4}}>
+              <div style={{fontSize:11,color:MUTED,fontWeight:600,marginBottom:6,textTransform:"uppercase",letterSpacing:.4}}>Recent Weeks</div>
+              {recentWeeks(5).reverse().map(w=>{
+                const wts=timesheets.find(t=>t.empId===user.employeeId&&t.week===w);
+                const wst=wts?.status||"none";
+                return(
+                  <div key={w} onClick={()=>setWeek(w)} style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"6px 8px",borderRadius:6,cursor:"pointer",background:week===w?"#F0FDF9":WHITE,border:"1px solid "+(week===w?TEAL+"44":BORDER),marginBottom:4}}>
+                    <span style={{fontSize:12,fontWeight:week===w?700:400,color:week===w?TEAL:TEXT}}>{w.replace("2026-","")}</span>
+                    {wst!=="none"?<span style={{fontSize:10,background:TS_STATUS[wst]?.bg,color:TS_STATUS[wst]?.fg,borderRadius:4,padding:"1px 6px",fontWeight:700}}>{TS_STATUS[wst]?.label}</span>:<span style={{fontSize:10,color:"#CBD5E1"}}>No data</span>}
+                  </div>
+                );
+              })}
             </div>
           </Card>
           {emp&&<Card>
@@ -857,6 +879,13 @@ function Employees({user,employees,setEmployees,allocs,teams}){
   const sendInvite=async()=>{if(!form.name||!form.email){setErr("Name and email required.");return;}setLoading(true);setErr("");setOk("");try{const res=await fetch("/api/invite",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({name:form.name,email:form.email,role:form.role,department:form.department,jobTitle:form.jobTitle,capacity:+form.capacity||40,teamId:form.teamId||null,phone:form.phone})});const data=await res.json();if(!res.ok)throw new Error(data.error||"Invite failed");setEmployees(prev=>[...prev,{id:data.employeeId||Date.now(),name:form.name,email:form.email,dept:form.department,role:form.jobTitle,capacity:+form.capacity||40,active:true,teamId:form.teamId||null,color:AVA_COLORS[employees.length%AVA_COLORS.length],appRole:form.role}]);setOk("Invite sent to "+form.email);setForm(blank);setShowInvite(false);}catch(e){setErr(e.message);}finally{setLoading(false);}};
   const saveEdit=async()=>{const{error}=await sb.from("employees").update({name:form.name,department:form.department,role:form.jobTitle,capacity:+form.capacity||40,active:form.active!=="false",phone:form.phone}).eq("id",editTarget.id);if(error){setErr(error.message);return;}setEmployees(prev=>prev.map(e=>e.id===editTarget.id?{...e,name:form.name,dept:form.department,role:form.jobTitle,capacity:+form.capacity||40,active:form.active!=="false",phone:form.phone}:e));setShowEdit(false);setEditTarget(null);setOk("Employee updated.");};
   const toggleActive=async emp=>{const{error}=await sb.from("employees").update({active:!emp.active}).eq("id",emp.id);if(!error)setEmployees(prev=>prev.map(e=>e.id===emp.id?{...e,active:!e.active}:e));};
+  const changeRole=async(emp,newRole)=>{
+    let updated=false;
+    const{data:au}=await sb.from("app_users").select("id").eq("employee_id",emp.id).single();
+    if(au){await sb.from("app_users").update({role:newRole}).eq("id",au.id);updated=true;}
+    if(!updated){const{data:auE}=await sb.from("app_users").select("id").eq("email",emp.email).single();if(auE)await sb.from("app_users").update({role:newRole}).eq("id",auE.id);}
+    setEmployees(prev=>prev.map(e=>e.id===emp.id?{...e,appRole:newRole}:e));
+  };
   const deleteEmp=async emp=>{const{error}=await sb.from("employees").delete().eq("id",emp.id);if(!error){setEmployees(prev=>prev.filter(e=>e.id!==emp.id));setDelTarget(null);}else setErr(error.message);};
   const openEdit=emp=>{setForm({name:emp.name,email:emp.email,role:emp.appRole||"user",department:emp.dept,jobTitle:emp.role,capacity:String(emp.capacity),teamId:emp.teamId||"",phone:emp.phone||"",active:String(emp.active)});setEditTarget(emp);setShowEdit(true);};
   return(
@@ -874,7 +903,7 @@ function Employees({user,employees,setEmployees,allocs,teams}){
       </div>
       <Card style={{padding:0,overflow:"hidden"}}>
         <table style={{width:"100%",borderCollapse:"collapse",fontSize:13}}>
-          <thead><tr style={{background:"#F8FAFC"}}>{["Employee","Department","Role","Cap","Team","Access","Status","Actions"].map(h=><th key={h} style={{padding:"10px 14px",textAlign:"left",fontWeight:600,color:MUTED,borderBottom:"1px solid "+BORDER}}>{h}</th>)}</tr></thead>
+          <thead><tr style={{background:"#F8FAFC"}}>{["Employee","Department","Job Title","Cap","Team","System Role","Status","Actions"].map(h=><th key={h} style={{padding:"10px 14px",textAlign:"left",fontWeight:600,color:MUTED,borderBottom:"1px solid "+BORDER}}>{h}</th>)}</tr></thead>
           <tbody>
             {filtered.map(e=>{const team=teams.find(t=>t.id===e.teamId||String(t.id)===String(e.teamId));return(
               <tr key={e.id} style={{borderBottom:"1px solid #F1F5F9",opacity:e.active?1:.55}}>
@@ -883,7 +912,12 @@ function Employees({user,employees,setEmployees,allocs,teams}){
                 <td style={{padding:"10px 14px",color:MUTED,fontSize:12}}>{e.role||"-"}</td>
                 <td style={{padding:"10px 14px",fontWeight:600}}>{e.capacity}h</td>
                 <td style={{padding:"10px 14px",color:MUTED,fontSize:12}}>{team?.name||"-"}</td>
-                <td style={{padding:"10px 14px"}}><RoleBadge role={e.appRole||"user"}/></td>
+                <td style={{padding:"8px 14px"}}>
+                  <select value={e.appRole||"user"} onChange={ev=>changeRole(e,ev.target.value)}
+                    style={{padding:"5px 8px",border:"1px solid "+BORDER,borderRadius:6,fontSize:12,fontWeight:600,background:ROLE_C[e.appRole||"user"]+"18",color:ROLE_C[e.appRole||"user"],cursor:"pointer"}}>
+                    <option value="user">User</option><option value="manager">Manager</option><option value="admin">Admin</option>
+                  </select>
+                </td>
                 <td style={{padding:"10px 14px"}}><Badge s={e.active?"active":"inactive"}/></td>
                 <td style={{padding:"10px 14px"}}><div style={{display:"flex",gap:5}}>
                   <Btn small onClick={()=>openEdit(e)}>Edit</Btn>
@@ -957,7 +991,19 @@ export default function App(){
 
   async function loadAll(authUser){
     setDataLoading(true);
-    const{data:profile}=await sb.from("app_users").select("*").eq("id",authUser.id).single();
+    let{data:profile}=await sb.from("app_users").select("*").eq("id",authUser.id).single();
+    // Fallback: create profile from auth metadata if missing
+    if(!profile){
+      const meta=authUser.user_metadata||{};
+      let empId=null;
+      // Try to find or create employee record
+      const{data:existEmp}=await sb.from("employees").select("id").eq("email",authUser.email).single();
+      if(existEmp){empId=existEmp.id;}
+      else{const{data:newEmp}=await sb.from("employees").insert({name:meta.name||authUser.email?.split("@")[0]||"User",email:authUser.email,department:"Management",role:"Administrator",capacity:40,active:true}).select().single();if(newEmp)empId=newEmp.id;}
+      await sb.from("app_users").upsert({id:authUser.id,name:meta.name||authUser.email?.split("@")[0]||"User",email:authUser.email,role:meta.role||"admin",employee_id:empId,is_active:true,avatar_color:TEAL},{onConflict:"id"});
+      const{data:newProfile}=await sb.from("app_users").select("*").eq("id",authUser.id).single();
+      profile=newProfile;
+    }
     const u={id:authUser.id,email:authUser.email,name:profile?.name||authUser.user_metadata?.name||authUser.email?.split("@")[0]||"User",role:profile?.role||authUser.user_metadata?.role||"user",teamId:profile?.team_id||null,employeeId:profile?.employee_id||null,avatarColor:profile?.avatar_color||TEAL,phone:profile?.phone||""};
     setUser(u);
     const isAdmin=u.role==="admin",isManager=u.role==="manager";
