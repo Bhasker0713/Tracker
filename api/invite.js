@@ -29,9 +29,10 @@ export default async function handler(req, res) {
       .select().single();
     if (empErr) return res.status(400).json({ error: "Employee: " + empErr.message });
 
-    const siteUrl = process.env.VERCEL_PROJECT_PRODUCTION_URL
-      ? "https://" + process.env.VERCEL_PROJECT_PRODUCTION_URL
-      : process.env.VERCEL_URL ? "https://" + process.env.VERCEL_URL : "http://localhost:5173";
+    const siteUrl = process.env.SITE_URL
+      || (process.env.VERCEL_PROJECT_PRODUCTION_URL ? "https://" + process.env.VERCEL_PROJECT_PRODUCTION_URL : null)
+      || (process.env.VERCEL_URL ? "https://" + process.env.VERCEL_URL : null)
+      || "http://localhost:5173";
 
     const { data: authData, error: authErr } = await admin.auth.admin.inviteUserByEmail(email, {
       redirectTo: siteUrl,
