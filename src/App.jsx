@@ -339,9 +339,11 @@ function Dashboard({user,employees,projects,allocs,entries,leaves,timesheets,tea
 
 function Timesheets({user,employees,projects,allocs,entries,setEntries,timesheets,setTimesheets,setView}){
   const isStaff=user.role==="admin"||user.role==="manager";
+  const DAYS=["Mon","Tue","Wed","Thu","Fri","Sat","Sun"];
   const [week,setWeek]=useState(currentWeek());
-  const [hours,setHours]=useState({});
-  const [notes,setNotes]=useState({});
+  const [mode,setMode]=useState("weekly"); // "weekly" | "daily"
+  const [hours,setHours]=useState({});  // projId -> "8" (weekly) or projId_Mon -> "4" (daily)
+  const [notes,setNotes]=useState({});  // projId -> note string
   const [addProjId,setAddProjId]=useState("");
   const [extraProjs,setExtraProjs]=useState([]);
   const [saving,setSaving]=useState(false);
@@ -353,44 +355,84 @@ function Timesheets({user,employees,projects,allocs,entries,setEntries,timesheet
   const ts=timesheets.find(t=>t.empId===user.employeeId&&t.week===week);
   const locked=ts?.status==="submitted"||ts?.status==="approved";
 
-  // Projects shown: for admin/manager = all active; for user = only allocated
   const empAllocs=allocs.filter(a=>String(a.empId)===String(user.employeeId));
-  const allocatedProjIds=empAllocs.map(a=>String(a.projId));
-  // Also include projects already logged this week
   const loggedProjIds=entries.filter(e=>String(e.empId)===String(user.employeeId)&&e.week===week).map(e=>String(e.projId));
   const shownProjIds=[...new Set([
-    ...(isStaff?projects.filter(p=>p.status!=="completed").map(p=>String(p.id)):allocatedProjIds),
-    ...loggedProjIds,
-    ...extraProjs,
+    ...(isStaff?projects.filter(p=>p.status!=="completed").map(p=>String(p.id)):empAllocs.map(a=>String(a.projId))),
+    ...loggedProjIds,...extraProjs,
   ])];
   const shownProjs=shownProjIds.map(id=>projects.find(p=>String(p.id)===id)).filter(Boolean);
   const unshownProjs=projects.filter(p=>!shownProjIds.includes(String(p.id))&&p.status!=="completed");
-  const totalHrs=Object.values(hours).reduce((s,v)=>s+(+v||0),0);
+
+  // Total hours
+  const totalHrs=mode==="weekly"
+    ? Object.values(hours).reduce((s,v)=>s+(+v||0),0)
+    : shownProjs.reduce((s,p)=>s+DAYS.reduce((d,day)=>d+(+hours[String(p.id)+"_"+day]||0),0),0);
+  const dailyTotals=DAYS.map(day=>shownProjs.reduce((s,p)=>s+(+hours[String(p.id)+"_"+day]||0),0));
   const utilPct=capacity>0?Math.round((totalHrs/capacity)*100):0;
 
   useEffect(()=>{
     const ex=entries.filter(e=>String(e.empId)===String(user.employeeId)&&e.week===week);
     const h={},n={};
-    ex.forEach(e=>{h[String(e.projId)]=String(e.hours);n[String(e.projId)]=e.note||"";});
+    if(mode==="weekly"){
+      // Aggregate daily entries into weekly totals per project
+      ex.forEach(e=>{
+        const pk=String(e.projId);
+        if(e.day){h[pk]=(+h[pk]||0)+(+e.hours||0);h[pk]=String(h[pk]);}
+        else{h[pk]=String(e.hours);}
+        n[pk]=n[pk]||e.note||"";
+      });
+    } else {
+      ex.forEach(e=>{
+        const pk=String(e.projId);
+        if(e.day){h[pk+"_"+e.day]=String(e.hours);}
+        else{
+          // spread weekly entry across Mon-Fri proportionally
+          const perDay=Math.floor((+e.hours||0)/5);
+          DAYS.slice(0,5).forEach(d=>{h[pk+"_"+d]=String(perDay);});
+        }
+        n[pk]=n[pk]||e.note||"";
+      });
+    }
     setHours(h);setNotes(n);
-  },[week,user.employeeId]);
+  },[week,user.employeeId,mode]);
 
   const saveDraft=async()=>{
-    if(!user.employeeId){setMsg({type:"error",text:"Your account has no employee profile linked. Contact your admin."});return;}
+    if(!user.employeeId){setMsg({type:"error",text:"Your account has no employee profile linked."});return;}
     setSaving(true);setMsg({type:"",text:""});
+
+    // Build rows to insert
+    let rows=[];
+    if(mode==="weekly"){
+      rows=shownProjs.filter(p=>hours[String(p.id)]&&+hours[String(p.id)]>0).map(p=>({
+        employee_id:user.employeeId,project_id:p.id,week,
+        hours:+hours[String(p.id)],note:notes[String(p.id)]||"",day:null
+      }));
+    } else {
+      shownProjs.forEach(p=>{
+        DAYS.forEach(day=>{
+          const h=+hours[String(p.id)+"_"+day]||0;
+          if(h>0) rows.push({employee_id:user.employeeId,project_id:p.id,week,hours:h,note:notes[String(p.id)]||"",day});
+        });
+      });
+    }
+
+    const totalH=rows.reduce((s,r)=>s+r.hours,0);
     const{data:tsData,error:tsErr}=await sb.from("timesheets").upsert({
       employee_id:user.employeeId,week,
       status:ts?.status==="rejected"?"draft":(ts?.status||"draft"),
-      total_hours:totalHrs,updated_at:new Date().toISOString()
+      total_hours:totalH,updated_at:new Date().toISOString()
     },{onConflict:"employee_id,week"}).select().single();
     if(tsErr){setMsg({type:"error",text:tsErr.message});setSaving(false);return;}
+
     await sb.from("time_entries").delete().eq("employee_id",user.employeeId).eq("week",week);
-    const rows=shownProjs.filter(p=>hours[String(p.id)]&&+hours[String(p.id)]>0).map(p=>({
-      employee_id:user.employeeId,project_id:p.id,week,
-      hours:+hours[String(p.id)],note:notes[String(p.id)]||"",timesheet_id:tsData.id
-    }));
-    if(rows.length>0){const{data:newE}=await sb.from("time_entries").insert(rows).select();if(newE)setEntries(prev=>[...prev.filter(e=>!(String(e.empId)===String(user.employeeId)&&e.week===week)),...newE.map(toEntry)]);}
-    else setEntries(prev=>prev.filter(e=>!(String(e.empId)===String(user.employeeId)&&e.week===week)));
+    if(rows.length>0){
+      const withTs=rows.map(r=>({...r,timesheet_id:tsData.id}));
+      const{data:newE}=await sb.from("time_entries").insert(withTs).select();
+      if(newE)setEntries(prev=>[...prev.filter(e=>!(String(e.empId)===String(user.employeeId)&&e.week===week)),...newE.map(toEntry)]);
+    } else {
+      setEntries(prev=>prev.filter(e=>!(String(e.empId)===String(user.employeeId)&&e.week===week)));
+    }
     setTimesheets(prev=>[...prev.filter(t=>!(t.empId===user.employeeId&&t.week===week)),toTs(tsData)]);
     setMsg({type:"ok",text:"Saved as draft."});setSaving(false);
   };
@@ -412,11 +454,11 @@ function Timesheets({user,employees,projects,allocs,entries,setEntries,timesheet
   const exportMyTimesheets=()=>{
     const rows=timesheets.filter(t=>t.empId===user.employeeId).flatMap(t=>{
       const ents=entries.filter(e=>String(e.empId)===String(user.employeeId)&&e.week===t.week);
-      if(ents.length===0)return[{Employee:emp?.name||"",Week:t.week,Project:"(no entries)",Hours:0,Notes:"",Status:t.status,Comment:t.comment}];
-      return ents.map(e=>{const p=projects.find(pr=>String(pr.id)===String(e.projId));return{Employee:emp?.name||"",Week:t.week,Project:p?.name||e.projId,Hours:e.hours,Notes:e.note,Status:t.status,Comment:t.comment};});
+      if(!ents.length)return[{Employee:emp?.name,Week:t.week,Day:"",Project:"",Hours:0,Notes:"",Status:t.status,Comment:t.comment}];
+      return ents.map(e=>{const p=projects.find(pr=>String(pr.id)===String(e.projId));return{Employee:emp?.name,Week:t.week,Day:e.day||"(weekly)",Project:p?.name||e.projId,Hours:e.hours,Notes:e.note,Status:t.status,Comment:t.comment};});
     });
-    if(rows.length===0){setMsg({type:"warn",text:"No timesheet data to export."});return;}
-    csvDownload(rows,"my-timesheets-"+user.employeeId+".csv");
+    if(!rows.length){setMsg({type:"warn",text:"No data to export yet."});return;}
+    csvDownload(rows,"timesheets-"+user.employeeId+".csv");
   };
 
   const stMeta=TS_STATUS[ts?.status||"draft"];
@@ -425,70 +467,47 @@ function Timesheets({user,employees,projects,allocs,entries,setEntries,timesheet
   return(
     <div>
       <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:20}}>
-        <div><h1 style={{fontSize:22,fontWeight:800,color:TEXT,margin:"0 0 3px"}}>My Timesheet</h1><p style={{color:MUTED,fontSize:13,margin:0}}>Log and submit weekly hours</p></div>
-        <div style={{display:"flex",gap:8}}>
-          <Btn onClick={exportMyTimesheets}>Export My Data</Btn>
+        <div><h1 style={{fontSize:22,fontWeight:800,color:TEXT,margin:"0 0 3px"}}>My Timesheet</h1><p style={{color:MUTED,fontSize:13,margin:0}}>Log and submit your hours</p></div>
+        <div style={{display:"flex",gap:8,alignItems:"center"}}>
+          {/* Daily / Weekly toggle */}
+          <div style={{display:"flex",background:"#F1F5F9",borderRadius:8,padding:3,gap:2}}>
+            {[{id:"weekly",label:"Weekly Total"},{id:"daily",label:"Daily Breakdown"}].map(m=>(
+              <button key={m.id} onClick={()=>setMode(m.id)} style={{padding:"6px 14px",borderRadius:6,border:"none",cursor:"pointer",background:mode===m.id?WHITE:"transparent",color:mode===m.id?TEXT:MUTED,fontSize:12,fontWeight:mode===m.id?700:400,boxShadow:mode===m.id?"0 1px 3px #00000010":"none"}}>{m.label}</button>
+            ))}
+          </div>
+          <Btn onClick={exportMyTimesheets}>Export</Btn>
           {isStaff&&projects.length===0&&<Btn primary onClick={()=>setView("projects")}>+ Create First Project</Btn>}
         </div>
       </div>
 
-      {!user.employeeId&&<div style={{padding:"14px 18px",background:"#FEF2F2",border:"1px solid #FCA5A5",borderRadius:10,marginBottom:16}}>
-        <div style={{fontWeight:700,color:"#991B1B",marginBottom:4}}>Employee profile not linked</div>
-        <div style={{fontSize:13,color:"#DC2626"}}>Your login account is not connected to an employee record. Go to Employees, find your record, and make sure your email matches. Then log out and back in.</div>
-      </div>}
-
-      {projects.length===0&&isStaff&&<div style={{padding:"14px 18px",background:"#FFF7ED",border:"1px solid #FED7AA",borderRadius:10,marginBottom:16,display:"flex",alignItems:"center",gap:12}}>
-        <span style={{fontSize:22}}>📁</span>
-        <div style={{flex:1}}><div style={{fontWeight:700,color:"#92400E",marginBottom:2}}>No projects yet</div><div style={{fontSize:13,color:"#C2410C"}}>Create projects first, then you can log hours against them.</div></div>
-        <Btn primary onClick={()=>setView("projects")}>Go to Projects</Btn>
-      </div>}
+      {!user.employeeId&&<div style={{padding:"14px 18px",background:"#FEF2F2",border:"1px solid #FCA5A5",borderRadius:10,marginBottom:16}}><div style={{fontWeight:700,color:"#991B1B",marginBottom:3}}>Employee profile not linked</div><div style={{fontSize:13,color:"#DC2626"}}>Your login is not connected to an employee record. Go to Employees, find your record, ensure the email matches, then log out and back in.</div></div>}
+      {projects.length===0&&isStaff&&<div style={{padding:"14px 18px",background:"#FFF7ED",border:"1px solid #FED7AA",borderRadius:10,marginBottom:16,display:"flex",alignItems:"center",gap:12}}><span style={{fontSize:22}}>📁</span><div style={{flex:1}}><div style={{fontWeight:700,color:"#92400E"}}>No projects yet</div><div style={{fontSize:13,color:"#C2410C"}}>Create projects first so you can log hours against them.</div></div><Btn primary onClick={()=>setView("projects")}>Go to Projects</Btn></div>}
 
       <div style={{display:"grid",gridTemplateColumns:"280px 1fr",gap:16}}>
         {/* Left: week navigator */}
         <div>
           <Card style={{marginBottom:14}}>
             <div style={{fontSize:11,fontWeight:700,color:MUTED,textTransform:"uppercase",letterSpacing:.5,marginBottom:10}}>Week</div>
-            {/* Prev / week label / Next */}
             <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:8}}>
-              <button onClick={()=>setWeek(addWeeks(week,-1))} style={{width:34,height:34,borderRadius:8,border:"1px solid "+BORDER,background:WHITE,cursor:"pointer",fontSize:15,display:"flex",alignItems:"center",justifyContent:"center",color:TEXT,fontWeight:700}}>{"<"}</button>
+              <button onClick={()=>setWeek(addWeeks(week,-1))} style={{width:34,height:34,borderRadius:8,border:"1px solid "+BORDER,background:WHITE,cursor:"pointer",fontSize:15,display:"flex",alignItems:"center",justifyContent:"center",fontWeight:700}}>{"<"}</button>
               <div style={{flex:1,textAlign:"center"}}>
                 <div style={{fontSize:15,fontWeight:800,color:TEXT}}>{week}</div>
                 <div style={{fontSize:11,color:week===cw?TEAL:MUTED,fontWeight:600}}>{week===cw?"Current week":week>cw?"Future":"Past"}</div>
               </div>
-              <button onClick={()=>setWeek(addWeeks(week,1))} disabled={!isStaff&&week>=cw} style={{width:34,height:34,borderRadius:8,border:"1px solid "+BORDER,background:(!isStaff&&week>=cw)?"#F8FAFC":WHITE,cursor:(!isStaff&&week>=cw)?"not-allowed":"pointer",fontSize:15,display:"flex",alignItems:"center",justifyContent:"center",color:(!isStaff&&week>=cw)?"#CBD5E1":TEXT,fontWeight:700}}>{">"}</button>
+              <button onClick={()=>setWeek(addWeeks(week,1))} disabled={!isStaff&&week>=cw} style={{width:34,height:34,borderRadius:8,border:"1px solid "+BORDER,background:(!isStaff&&week>=cw)?"#F8FAFC":WHITE,cursor:(!isStaff&&week>=cw)?"not-allowed":"pointer",fontSize:15,display:"flex",alignItems:"center",justifyContent:"center",fontWeight:700,color:(!isStaff&&week>=cw)?"#CBD5E1":TEXT}}>{">"}</button>
             </div>
             {week!==cw&&<button onClick={()=>setWeek(cw)} style={{width:"100%",padding:"6px",background:"#F0FDF9",border:"1px solid "+TEAL+"44",borderRadius:7,color:TEAL,fontSize:12,fontWeight:600,cursor:"pointer",marginBottom:10}}>Jump to Current Week</button>}
-
-            {/* Direct week entry for admin/manager */}
             {isStaff&&<>
               <div style={{fontSize:11,fontWeight:700,color:MUTED,textTransform:"uppercase",letterSpacing:.5,marginBottom:5}}>Go to Specific Week</div>
-              <div style={{display:"flex",gap:6,marginBottom:10}}>
-                <input
-                  type="number" placeholder="Year e.g. 2024"
-                  defaultValue={parseInt(week.split("-W")[0])}
-                  id="ts-year-input"
-                  style={{flex:2,padding:"7px 10px",border:"1px solid "+BORDER,borderRadius:6,fontSize:13,width:"100%"}}
-                />
-                <input
-                  type="number" placeholder="Wk 1-52" min={1} max={52}
-                  defaultValue={parseInt(week.split("-W")[1])}
-                  id="ts-week-input"
-                  style={{flex:1,padding:"7px 10px",border:"1px solid "+BORDER,borderRadius:6,fontSize:13,width:"100%"}}
-                />
-                <button onClick={()=>{
-                  const y=document.getElementById("ts-year-input").value;
-                  const w2=document.getElementById("ts-week-input").value;
-                  if(y&&w2&&+y>2000&&+w2>=1&&+w2<=53)setWeek(y+"-W"+String(w2).padStart(2,"0"));
-                }} style={{padding:"7px 12px",borderRadius:6,border:"none",background:TEAL,color:"#fff",fontSize:12,fontWeight:700,cursor:"pointer",whiteSpace:"nowrap"}}>Go</button>
+              <div style={{display:"flex",gap:5,marginBottom:10}}>
+                <input type="number" placeholder="Year" defaultValue={parseInt(week)} id="ts-yr" style={{flex:2,padding:"7px 8px",border:"1px solid "+BORDER,borderRadius:6,fontSize:12,width:"100%"}}/>
+                <input type="number" placeholder="Wk" min={1} max={53} defaultValue={parseInt(week.split("-W")[1])} id="ts-wk" style={{flex:1,padding:"7px 6px",border:"1px solid "+BORDER,borderRadius:6,fontSize:12,width:"100%"}}/>
+                <button onClick={()=>{const y=document.getElementById("ts-yr").value,w2=document.getElementById("ts-wk").value;if(y&&w2&&+y>2000&&+w2>=1&&+w2<=53)setWeek(y+"-W"+String(w2).padStart(2,"0"));}} style={{padding:"7px 10px",borderRadius:6,border:"none",background:TEAL,color:"#fff",fontSize:12,fontWeight:700,cursor:"pointer"}}>Go</button>
               </div>
-              {/* Year quick-jump */}
-              <div style={{fontSize:11,fontWeight:700,color:MUTED,textTransform:"uppercase",letterSpacing:.5,marginBottom:5}}>Year</div>
-              <div style={{display:"flex",gap:4,marginBottom:10}}>
-                {["2023","2024","2025","2026","2027"].map(yr=><button key={yr} onClick={()=>setWeek(yr+"-W01")} style={{flex:1,padding:"5px 2px",borderRadius:6,border:"1px solid "+BORDER,background:week.startsWith(yr)?TEAL:WHITE,color:week.startsWith(yr)?"#fff":TEXT,fontSize:11,fontWeight:600,cursor:"pointer"}}>{yr}</button>)}
+              <div style={{display:"flex",gap:3,marginBottom:10}}>
+                {["2023","2024","2025","2026","2027"].map(yr=><button key={yr} onClick={()=>setWeek(yr+"-W01")} style={{flex:1,padding:"5px 2px",borderRadius:5,border:"1px solid "+BORDER,background:week.startsWith(yr)?TEAL:WHITE,color:week.startsWith(yr)?"#fff":TEXT,fontSize:10,fontWeight:600,cursor:"pointer"}}>{yr}</button>)}
               </div>
             </>}
-
-            {/* Quick Pick */}
             <div style={{fontSize:11,fontWeight:700,color:MUTED,textTransform:"uppercase",letterSpacing:.5,marginBottom:5}}>Quick Pick</div>
             {[addWeeks(cw,-3),addWeeks(cw,-2),addWeeks(cw,-1),cw,addWeeks(cw,1)].map(w=>{
               const wts=timesheets.find(t=>t.empId===user.employeeId&&t.week===w);
@@ -500,81 +519,130 @@ function Timesheets({user,employees,projects,allocs,entries,setEntries,timesheet
             })}
           </Card>
           {emp&&<Card>
-            <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:12}}>
+            <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:10}}>
               <Av name={emp.name} color={emp.color||TEAL} sz={36}/>
-              <div><div style={{fontSize:13,fontWeight:700}}>{emp.name}</div><div style={{fontSize:11,color:MUTED}}>{emp.role}</div><div style={{fontSize:11,color:MUTED}}>Capacity: {emp.capacity}h/wk</div></div>
+              <div><div style={{fontSize:13,fontWeight:700}}>{emp.name}</div><div style={{fontSize:11,color:MUTED}}>{emp.role}</div><div style={{fontSize:11,color:MUTED}}>Cap: {emp.capacity}h/wk</div></div>
             </div>
-            <div style={{fontSize:12,color:MUTED,marginBottom:5}}>This week: {totalHrs}h / {capacity}h</div>
-            <Prog val={utilPct} h={8}/><div style={{fontSize:13,fontWeight:700,color:utilColor(utilPct).fg,marginTop:5,textAlign:"right"}}>{utilPct}%</div>
+            <div style={{fontSize:12,color:MUTED,marginBottom:5}}>{totalHrs}h / {capacity}h this week</div>
+            <Prog val={utilPct} h={7}/>
+            <div style={{fontSize:13,fontWeight:700,color:utilColor(utilPct).fg,marginTop:4,textAlign:"right"}}>{utilPct}%</div>
           </Card>}
         </div>
 
         {/* Right: timesheet grid */}
         <div>
           {/* Status banner */}
-          <div style={{padding:"12px 16px",background:stMeta?.bg||"#F1F5F9",borderRadius:10,marginBottom:14,display:"flex",alignItems:"center",gap:12,border:"1px solid "+BORDER}}>
-            <span style={{fontSize:20}}>{stMeta?.icon}</span>
+          <div style={{padding:"10px 16px",background:stMeta?.bg||"#F1F5F9",borderRadius:10,marginBottom:12,display:"flex",alignItems:"center",gap:10,border:"1px solid "+BORDER}}>
+            <span style={{fontSize:18}}>{stMeta?.icon}</span>
             <div style={{flex:1}}>
-              <span style={{fontSize:14,fontWeight:700,color:stMeta?.fg}}>{stMeta?.label}</span>
+              <span style={{fontSize:13,fontWeight:700,color:stMeta?.fg}}>{stMeta?.label}</span>
               {ts?.submittedAt&&<span style={{fontSize:12,color:MUTED}}> - Submitted {new Date(ts.submittedAt).toLocaleDateString()}</span>}
               {ts?.reviewedAt&&<span style={{fontSize:12,color:MUTED}}> - Reviewed {new Date(ts.reviewedAt).toLocaleDateString()}</span>}
-              {ts?.comment&&<div style={{fontSize:13,color:stMeta?.fg,marginTop:3,fontStyle:"italic"}}>Manager: {ts.comment}</div>}
+              {ts?.comment&&<div style={{fontSize:12,color:stMeta?.fg,marginTop:2,fontStyle:"italic"}}>Manager: {ts.comment}</div>}
             </div>
           </div>
           <Alrt type={msg.type} msg={msg.text}/>
-          <Card>
-            {/* Column headers */}
-            <div style={{display:"grid",gridTemplateColumns:"1fr 90px 1fr",gap:10,padding:"6px 12px",marginBottom:6}}>
-              {["Project","Hours","Notes"].map(h=><span key={h} style={{fontSize:11,fontWeight:700,color:MUTED,textTransform:"uppercase",letterSpacing:.5}}>{h}</span>)}
+
+          {/* ── WEEKLY MODE ── */}
+          {mode==="weekly"&&<Card>
+            <div style={{display:"grid",gridTemplateColumns:"1fr 90px 1fr",gap:8,padding:"5px 10px",marginBottom:6}}>
+              {["Project","Hours","Comments / Notes"].map(h=><span key={h} style={{fontSize:11,fontWeight:700,color:MUTED,textTransform:"uppercase",letterSpacing:.4}}>{h}</span>)}
             </div>
-            {/* Project rows */}
             {shownProjs.length===0?(
               <div style={{textAlign:"center",padding:"36px 0",color:MUTED}}>
-                <div style={{fontSize:32,marginBottom:10}}>📁</div>
-                <div style={{fontSize:14,fontWeight:600,marginBottom:6}}>{projects.length===0?"No projects created yet":"No projects allocated yet"}</div>
-                {isStaff&&projects.length===0&&<Btn primary small onClick={()=>setView("projects")}>Create a Project</Btn>}
-                {!isStaff&&projects.length>0&&<div style={{fontSize:13}}>Ask your manager to allocate you to a project.</div>}
+                <div style={{fontSize:28,marginBottom:8}}>📁</div>
+                <div style={{fontWeight:600,marginBottom:6}}>{projects.length===0?"No projects yet":"No projects allocated"}</div>
+                {isStaff&&projects.length===0&&<Btn small primary onClick={()=>setView("projects")}>Create a Project</Btn>}
               </div>
             ):shownProjs.map(p=>{
-              const a=empAllocs.find(al=>String(al.projId)===String(p.id));
-              const pk=String(p.id);
-              const hasHrs=hours[pk]&&+hours[pk]>0;
-              return <div key={p.id} style={{display:"grid",gridTemplateColumns:"1fr 90px 1fr",gap:10,alignItems:"center",padding:"10px 12px",background:hasHrs?"#F0FDF9":"#F8FAFC",borderRadius:8,marginBottom:7,border:"1px solid "+(hasHrs?TEAL+"44":BORDER)}}>
-                <div>
-                  <div style={{fontSize:13,fontWeight:600}}>{p.name}</div>
-                  <div style={{fontSize:11,color:MUTED}}>{p.client}{a?` - ${a.hoursPerWeek}h/wk alloc`:isStaff?" - not allocated":""}</div>
-                </div>
+              const pk=String(p.id);const hasH=+hours[pk]>0;const a=empAllocs.find(al=>String(al.projId)===pk);
+              return <div key={p.id} style={{display:"grid",gridTemplateColumns:"1fr 90px 1fr",gap:8,alignItems:"start",padding:"10px 10px",background:hasH?"#F0FDF9":"#F8FAFC",borderRadius:8,marginBottom:6,border:"1px solid "+(hasH?TEAL+"44":BORDER)}}>
+                <div><div style={{fontSize:13,fontWeight:600}}>{p.name}</div><div style={{fontSize:11,color:MUTED}}>{p.client}{a?"":" - not allocated"}</div></div>
                 <input type="number" min="0" max="80" value={hours[pk]||""} disabled={locked}
                   onChange={e=>setHours(h=>({...h,[pk]:e.target.value}))}
-                  style={{padding:"8px",border:"1.5px solid "+(hasHrs?TEAL:BORDER),borderRadius:6,fontSize:16,fontWeight:700,textAlign:"center",width:"100%",boxSizing:"border-box",background:locked?"#F8FAFC":WHITE}}/>
-                <input type="text" value={notes[pk]||""} disabled={locked} placeholder="What did you work on?"
+                  style={{padding:"8px 6px",border:"1.5px solid "+(hasH?TEAL:BORDER),borderRadius:6,fontSize:16,fontWeight:700,textAlign:"center",width:"100%",boxSizing:"border-box",background:locked?"#F8FAFC":WHITE}}/>
+                <textarea value={notes[pk]||""} disabled={locked} placeholder="What did you work on? Any blockers?" rows={2}
                   onChange={e=>setNotes(n=>({...n,[pk]:e.target.value}))}
-                  style={{padding:"9px 12px",border:"1px solid "+BORDER,borderRadius:6,fontSize:13,width:"100%",boxSizing:"border-box",background:locked?"#F8FAFC":WHITE}}/>
+                  style={{padding:"8px 10px",border:"1px solid "+BORDER,borderRadius:6,fontSize:12,width:"100%",boxSizing:"border-box",resize:"none",background:locked?"#F8FAFC":WHITE,lineHeight:1.4}}/>
               </div>;
             })}
-
-            {/* Add project row (admin/manager or if projects exist) */}
-            {!locked&&isStaff&&unshownProjs.length>0&&<div style={{display:"flex",gap:10,marginTop:4,padding:"8px 12px",background:"#F8FAFC",borderRadius:8,border:"1px dashed "+BORDER,alignItems:"center"}}>
-              <select value={addProjId} onChange={e=>setAddProjId(e.target.value)} style={{flex:1,padding:"8px 12px",border:"1px solid "+BORDER,borderRadius:6,fontSize:13,color:MUTED}}>
-                <option value="">+ Add another project to this timesheet...</option>
+            {!locked&&isStaff&&unshownProjs.length>0&&<div style={{display:"flex",gap:8,marginTop:4,padding:"8px 10px",background:"#F8FAFC",borderRadius:8,border:"1px dashed "+BORDER,alignItems:"center"}}>
+              <select value={addProjId} onChange={e=>setAddProjId(e.target.value)} style={{flex:1,padding:"7px 10px",border:"1px solid "+BORDER,borderRadius:6,fontSize:13,color:MUTED}}>
+                <option value="">+ Add another project to this week...</option>
                 {unshownProjs.map(p=><option key={p.id} value={String(p.id)}>{p.name} ({p.client})</option>)}
               </select>
               <Btn small primary onClick={()=>{if(addProjId){setExtraProjs(prev=>[...prev,addProjId]);setAddProjId("");}}} disabled={!addProjId}>Add</Btn>
             </div>}
-
-            {/* Totals row */}
-            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"12px 14px",background:totalHrs>capacity?"#FEF2F2":totalHrs>0?"#F0FDF9":"#F8FAFC",borderRadius:8,marginTop:8,border:"1px solid "+(totalHrs>capacity?"#FCA5A5":totalHrs>0?TEAL+"44":BORDER)}}>
-              <span style={{fontSize:14,fontWeight:600}}>Total logged</span>
-              <div style={{display:"flex",alignItems:"center",gap:12}}>
-                <span style={{fontSize:22,fontWeight:800,color:totalHrs>capacity?"#EF4444":TEAL}}>{totalHrs}h</span>
-                <span style={{fontSize:13,color:MUTED}}>of {capacity}h ({utilPct}%)</span>
-              </div>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"12px 12px",background:totalHrs>capacity?"#FEF2F2":totalHrs>0?"#F0FDF9":"#F8FAFC",borderRadius:8,marginTop:8,border:"1px solid "+(totalHrs>capacity?"#FCA5A5":totalHrs>0?TEAL+"44":BORDER)}}>
+              <span style={{fontSize:14,fontWeight:700}}>Total</span>
+              <div style={{display:"flex",alignItems:"center",gap:10}}><span style={{fontSize:22,fontWeight:800,color:totalHrs>capacity?"#EF4444":TEAL}}>{totalHrs}h</span><span style={{fontSize:13,color:MUTED}}>of {capacity}h ({utilPct}%)</span></div>
             </div>
             {!locked&&user.employeeId&&shownProjs.length>0&&<div style={{display:"flex",gap:10,marginTop:12}}>
               <Btn full disabled={saving} onClick={saveDraft}>{saving?<><Spin dark/>Saving...</>:"Save Draft"}</Btn>
               <Btn primary full disabled={submitting||saving} onClick={submit}>{submitting?<><Spin/>Submitting...</>:"Submit for Approval"}</Btn>
             </div>}
-          </Card>
+          </Card>}
+
+          {/* ── DAILY MODE ── */}
+          {mode==="daily"&&<Card style={{padding:0,overflow:"auto"}}>
+            <table style={{width:"100%",borderCollapse:"collapse",fontSize:12,minWidth:700}}>
+              <thead>
+                <tr style={{background:"#F8FAFC"}}>
+                  <th style={{padding:"10px 14px",textAlign:"left",fontWeight:700,color:MUTED,borderBottom:"1px solid "+BORDER,minWidth:160}}>Project</th>
+                  {DAYS.map(d=><th key={d} style={{padding:"10px 8px",textAlign:"center",fontWeight:700,color:MUTED,borderBottom:"1px solid "+BORDER,minWidth:60}}>{d}</th>)}
+                  <th style={{padding:"10px 10px",textAlign:"center",fontWeight:700,color:TEAL,borderBottom:"1px solid "+BORDER}}>Total</th>
+                  <th style={{padding:"10px 10px",textAlign:"left",fontWeight:700,color:MUTED,borderBottom:"1px solid "+BORDER,minWidth:180}}>Comments</th>
+                </tr>
+              </thead>
+              <tbody>
+                {shownProjs.length===0?(
+                  <tr><td colSpan={10} style={{textAlign:"center",padding:"36px",color:MUTED}}>No projects yet. {isStaff&&<button onClick={()=>setView("projects")} style={{color:TEAL,background:"none",border:"none",cursor:"pointer",fontWeight:700}}>Create a project</button>}</td></tr>
+                ):shownProjs.map((p,pi)=>{
+                  const pk=String(p.id);
+                  const rowTotal=DAYS.reduce((s,d)=>s+(+hours[pk+"_"+d]||0),0);
+                  return <tr key={p.id} style={{background:pi%2===0?WHITE:"#FAFBFC",borderBottom:"1px solid #F1F5F9"}}>
+                    <td style={{padding:"8px 14px"}}>
+                      <div style={{fontWeight:600,fontSize:13}}>{p.name}</div>
+                      <div style={{fontSize:10,color:MUTED}}>{p.client}</div>
+                    </td>
+                    {DAYS.map(d=>{
+                      const cellKey=pk+"_"+d;const cellH=hours[cellKey]||"";
+                      return <td key={d} style={{padding:"4px 4px",textAlign:"center"}}>
+                        <input type="number" min="0" max="24" value={cellH} disabled={locked}
+                          onChange={e=>setHours(h=>({...h,[cellKey]:e.target.value}))}
+                          style={{width:52,padding:"6px 4px",border:"1px solid "+(+cellH>0?TEAL:BORDER),borderRadius:5,fontSize:13,fontWeight:+cellH>0?700:400,textAlign:"center",background:locked?"#F8FAFC":+cellH>0?"#F0FDF9":WHITE,color:+cellH>0?TEAL:TEXT}}/>
+                      </td>;
+                    })}
+                    <td style={{padding:"4px 8px",textAlign:"center",fontWeight:700,color:rowTotal>0?TEAL:MUTED,fontSize:14}}>{rowTotal||"-"}</td>
+                    <td style={{padding:"4px 8px"}}>
+                      <textarea value={notes[pk]||""} disabled={locked} placeholder="Notes..." rows={1}
+                        onChange={e=>setNotes(n=>({...n,[pk]:e.target.value}))}
+                        style={{width:"100%",padding:"5px 8px",border:"1px solid "+BORDER,borderRadius:5,fontSize:11,resize:"vertical",boxSizing:"border-box",background:locked?"#F8FAFC":WHITE,minHeight:28}}/>
+                    </td>
+                  </tr>;
+                })}
+              </tbody>
+              <tfoot>
+                <tr style={{background:"#F8FAFC",borderTop:"2px solid "+BORDER}}>
+                  <td style={{padding:"10px 14px",fontWeight:700,fontSize:13}}>Daily Total</td>
+                  {dailyTotals.map((t,i)=><td key={i} style={{padding:"10px 4px",textAlign:"center",fontWeight:700,fontSize:14,color:t>0?TEAL:MUTED}}>{t||"-"}</td>)}
+                  <td style={{padding:"10px 8px",textAlign:"center",fontWeight:800,fontSize:15,color:TEAL}}>{totalHrs}h</td>
+                  <td style={{padding:"10px 8px",fontSize:12,color:MUTED}}>{utilPct}% of {capacity}h</td>
+                </tr>
+              </tfoot>
+            </table>
+            {!locked&&isStaff&&unshownProjs.length>0&&<div style={{display:"flex",gap:8,padding:"10px 14px",background:"#F8FAFC",borderTop:"1px solid "+BORDER,alignItems:"center"}}>
+              <select value={addProjId} onChange={e=>setAddProjId(e.target.value)} style={{flex:1,padding:"7px 10px",border:"1px solid "+BORDER,borderRadius:6,fontSize:13,color:MUTED}}>
+                <option value="">+ Add another project...</option>
+                {unshownProjs.map(p=><option key={p.id} value={String(p.id)}>{p.name} ({p.client})</option>)}
+              </select>
+              <Btn small primary onClick={()=>{if(addProjId){setExtraProjs(prev=>[...prev,addProjId]);setAddProjId("");}}} disabled={!addProjId}>Add</Btn>
+            </div>}
+            {!locked&&user.employeeId&&shownProjs.length>0&&<div style={{display:"flex",gap:10,padding:"12px 14px",borderTop:"1px solid "+BORDER}}>
+              <Btn full disabled={saving} onClick={saveDraft}>{saving?<><Spin dark/>Saving...</>:"Save Draft"}</Btn>
+              <Btn primary full disabled={submitting||saving} onClick={submit}>{submitting?<><Spin/>Submitting...</>:"Submit for Approval"}</Btn>
+            </div>}
+          </Card>}
         </div>
       </div>
     </div>
@@ -1071,7 +1139,19 @@ function Employees({user,employees,setEmployees,allocs,teams}){
   const depts=[...new Set(employees.map(e=>e.dept))].filter(Boolean);
   const filtered=employees.filter(e=>{const q=search.toLowerCase();return(!q||(e.name||"").toLowerCase().includes(q)||(e.email||"").toLowerCase().includes(q))&&(!fDept||e.dept===fDept);});
   const sendInvite=async()=>{if(!form.name||!form.email){setErr("Name and email required.");return;}setLoading(true);setErr("");setOk("");try{const res=await fetch("/api/invite",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({name:form.name,email:form.email,role:form.role,department:form.department,jobTitle:form.jobTitle,capacity:+form.capacity||40,teamId:form.teamId||null,phone:form.phone})});const data=await res.json();if(!res.ok)throw new Error(data.error||"Invite failed");setEmployees(prev=>[...prev,{id:data.employeeId||Date.now(),name:form.name,email:form.email,dept:form.department,role:form.jobTitle,capacity:+form.capacity||40,active:true,teamId:form.teamId||null,color:AVA_COLORS[employees.length%AVA_COLORS.length],appRole:form.role}]);setOk("Invite sent to "+form.email);setForm(blank);setShowInvite(false);}catch(e){setErr(e.message);}finally{setLoading(false);}};
-  const saveEdit=async()=>{const{error}=await sb.from("employees").update({name:form.name,department:form.department,role:form.jobTitle,capacity:+form.capacity||40,active:form.active!=="false",phone:form.phone}).eq("id",editTarget.id);if(error){setErr(error.message);return;}setEmployees(prev=>prev.map(e=>e.id===editTarget.id?{...e,name:form.name,dept:form.department,role:form.jobTitle,capacity:+form.capacity||40,active:form.active!=="false",phone:form.phone}:e));setShowEdit(false);setEditTarget(null);setOk("Employee updated.");};
+  const saveEdit=async()=>{
+    const{error}=await sb.from("employees").update({name:form.name,department:form.department,role:form.jobTitle,capacity:+form.capacity||40,active:form.active!=="false",phone:form.phone,team_id:form.teamId||null}).eq("id",editTarget.id);
+    if(error){setErr(error.message);return;}
+    // Update team membership if team changed
+    if(form.teamId){
+      await sb.from("team_members").upsert({team_id:form.teamId,employee_id:editTarget.id},{onConflict:"team_id,employee_id"});
+    } else {
+      // Remove from all teams if team cleared
+      await sb.from("team_members").delete().eq("employee_id",editTarget.id);
+    }
+    setEmployees(prev=>prev.map(e=>e.id===editTarget.id?{...e,name:form.name,dept:form.department,role:form.jobTitle,capacity:+form.capacity||40,active:form.active!=="false",phone:form.phone,teamId:form.teamId||null}:e));
+    setShowEdit(false);setEditTarget(null);setOk("Employee updated.");
+  };
   const toggleActive=async emp=>{const{error}=await sb.from("employees").update({active:!emp.active}).eq("id",emp.id);if(!error)setEmployees(prev=>prev.map(e=>e.id===emp.id?{...e,active:!e.active}:e));};
   const changeRole=async(emp,newRole)=>{
     let updated=false;
@@ -1152,6 +1232,8 @@ function Employees({user,employees,setEmployees,allocs,teams}){
       {showEdit&&editTarget&&<Modal title={"Edit - "+editTarget.name} onClose={()=>{setShowEdit(false);setEditTarget(null);}}>
         {err&&<Alrt type="error" msg={err}/>}
         <Inp label="Full Name" value={form.name} onChange={F("name")} required/><Inp label="Department" value={form.department} onChange={F("department")}/><Inp label="Job Title" value={form.jobTitle} onChange={F("jobTitle")}/><Inp label="Phone" value={form.phone} onChange={F("phone")}/><Inp label="Weekly Capacity" type="number" value={form.capacity} onChange={F("capacity")}/>
+        <SelF label="System Role" value={form.role} onChange={F("role")} options={[{value:"user",label:"User"},{value:"manager",label:"Manager"},{value:"admin",label:"Admin"}]}/>
+        <SelF label="Assign to Team" value={form.teamId||""} onChange={F("teamId")} options={[{value:"",label:"No team"},...teams.map(t=>({value:String(t.id),label:t.name}))]}/>
         <SelF label="Status" value={form.active} onChange={F("active")} options={[{value:"true",label:"Active"},{value:"false",label:"Inactive"}]}/>
         <div style={{display:"flex",gap:10,marginTop:8}}><Btn primary full onClick={saveEdit}>Save Changes</Btn><Btn full onClick={()=>{setShowEdit(false);setEditTarget(null);}}>Cancel</Btn></div>
       </Modal>}
