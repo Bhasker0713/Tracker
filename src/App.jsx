@@ -641,7 +641,7 @@ function Timesheets({user,employees,projects,entries,setEntries,timesheets,setTi
             </div>
             {!locked&&user.employeeId&&<div style={{display:"flex",gap:10}}>
               <Btn disabled={saving} onClick={saveDraft} style={{minWidth:120}}>{saving?<><Spin dark/>Saving...</>:"Save Draft"}</Btn>
-              <Btn primary disabled={submitting||saving} onClick={submit} style={{minWidth:160}}>{submitting?<><Spin/>Submitting...":"Submit for Approval"}</Btn>
+              <Btn primary disabled={submitting||saving} onClick={submit} style={{minWidth:160}}>{submitting?<><Spin/>{"Submitting..."}</>:"Submit for Approval"}</Btn>
             </div>}
             {locked&&<div style={{padding:"10px 16px",background:stMeta?.bg,borderRadius:8}}>
               <span style={{fontSize:13,fontWeight:600,color:stMeta?.fg}}>{stMeta?.icon} {stMeta?.label}</span>
@@ -760,22 +760,18 @@ function Approvals({user,employees,timesheets,setTimesheets,leaves,setLeaves,ent
 }
 
 /* ── Projects (with tasks, costs, billable) ───────────────── */
-function Projects({user,projects,setProjects,allocs,setAllocs,employees,entries}){
+function Projects({user,projects,setProjects,allocs,setAllocs,employees,entries,allTasks,setAllTasks,allCosts,setAllCosts}){
   const [showNew,setShowNew]=useState(false);const [sel,setSel]=useState(null);const [selTab,setSelTab]=useState("team");const [saving,setSaving]=useState(false);
   const [aForm,setAForm]=useState({empId:"",hrs:""});
   const [tForm,setTForm]=useState({name:"",desc:"",estHrs:"",billable:true});
   const [cForm,setCForm]=useState({desc:"",amount:"",category:"Material",date:""});
-  const [tasks,setTasks]=useState([]);const [costs,setCosts]=useState([]);
+
   const [form,setForm]=useState({name:"",client:"",status:"planning",start:"",end:"",budget:"",billable:true,costBudget:""});
   const F=k=>e=>setForm(p=>({...p,[k]:e.target.value}));
   const canEdit=user.role==="admin"||user.role==="manager";
 
   // Load tasks and costs when project expanded
-  useEffect(()=>{
-    if(!sel)return;
-    sb.from("project_tasks").select("*").eq("project_id",sel).order("created_at").then(({data})=>setTasks((data||[]).map(toTask)));
-    sb.from("project_costs").select("*").eq("project_id",sel).order("date",{ascending:false}).then(({data})=>setCosts((data||[]).map(toCost)));
-  },[sel]);
+
 
   const addProj=async()=>{
     if(!form.name)return;setSaving(true);
@@ -789,14 +785,14 @@ function Projects({user,projects,setProjects,allocs,setAllocs,employees,entries}
   const removeAlloc=async id=>{const alloc=allocs.find(a=>a.id===id);const{error}=await sb.from("allocations").delete().eq("id",id);if(!error){setAllocs(prev=>prev.filter(a=>a.id!==id));if(alloc){const pr=projects.find(p=>String(p.id)===String(alloc.projId));await notifyEmp(alloc.empId,"You have been removed from project \""+( pr?.name||"a project")+"\" by "+user.name,"warn");}}};
   const addTask=async projId=>{
     if(!tForm.name)return;const{data,error}=await sb.from("project_tasks").insert({project_id:projId,name:tForm.name,description:tForm.desc,estimated_hours:+tForm.estHrs||0,billable:tForm.billable,status:"active"}).select().single();
-    if(!error&&data){setTasks(prev=>[...prev,toTask(data)]);setTForm({name:"",desc:"",estHrs:"",billable:true});}
+    if(!error&&data){setAllTasks(prev=>[...prev,toTask(data)]);setTForm({name:"",desc:"",estHrs:"",billable:true});}
   };
-  const removeTask=async id=>{const{error}=await sb.from("project_tasks").delete().eq("id",id);if(!error)setTasks(prev=>prev.filter(t=>t.id!==id));};
+  const removeTask=async id=>{const{error}=await sb.from("project_tasks").delete().eq("id",id);if(!error)setAllTasks(prev=>prev.filter(t=>t.id!==id));};
   const addCost=async projId=>{
     if(!cForm.desc||!cForm.amount)return;const{data,error}=await sb.from("project_costs").insert({project_id:projId,description:cForm.desc,amount:+cForm.amount,category:cForm.category,date:cForm.date||new Date().toISOString().slice(0,10)}).select().single();
-    if(!error&&data){setCosts(prev=>[...prev,toCost(data)]);setCForm({desc:"",amount:"",category:"Material",date:""});}
+    if(!error&&data){setAllCosts(prev=>[...prev,toCost(data)]);setCForm({desc:"",amount:"",category:"Material",date:""});}
   };
-  const removeCost=async id=>{const{error}=await sb.from("project_costs").delete().eq("id",id);if(!error)setCosts(prev=>prev.filter(c=>c.id!==id));};
+  const removeCost=async id=>{const{error}=await sb.from("project_costs").delete().eq("id",id);if(!error)setAllCosts(prev=>prev.filter(c=>c.id!==id));};
   const updateStatus=async(projId,status)=>{const{error}=await sb.from("projects").update({status}).eq("id",projId);if(!error)setProjects(prev=>prev.map(p=>p.id===projId?{...p,status}:p));};
   const toggleBillable=async(projId,billable)=>{const{error}=await sb.from("projects").update({billable}).eq("id",projId);if(!error)setProjects(prev=>prev.map(p=>p.id===projId?{...p,billable}:p));};
 
@@ -833,8 +829,10 @@ function Projects({user,projects,setProjects,allocs,setAllocs,employees,entries}
           const isOpen=sel===p.id;
           const loggedHrs=entries.filter(e=>String(e.projId)===String(p.id)).reduce((s,e)=>s+e.hours,0);
           const budgetPct=p.budgetHours>0?Math.round((loggedHrs/p.budgetHours)*100):0;
-          const pTasks=isOpen?tasks:[];const pCosts=isOpen?costs:[];
-          const totalCosts=pCosts.reduce((s,c)=>s+c.amount,0);
+          const pTasks=allTasks.filter(t=>String(t.projId)===String(p.id));const pCosts=allCosts.filter(c=>String(c.projId)===String(p.id));
+          const totalMaterialCost=pCosts.reduce((s,c)=>s+c.amount,0);
+          const laborCost=pAllocs.reduce((s,a)=>{const e=employees.find(em=>String(em.id)===String(a.empId));const hrs=entries.filter(en=>String(en.projId)===String(p.id)&&String(en.empId)===String(a.empId)).reduce((t,en)=>t+en.hours,0);return s+(e?.billingRate||0)*hrs;},0);
+          const totalProjectCost=laborCost+totalMaterialCost;
           const unassigned=employees.filter(e=>e.active&&!pAllocs.find(a=>String(a.empId)===String(e.id)));
           return(
             <Card key={p.id} style={{padding:0,overflow:"hidden"}}>
@@ -850,7 +848,10 @@ function Projects({user,projects,setProjects,allocs,setAllocs,employees,entries}
                     <div style={{display:"flex",alignItems:"center",gap:14,flexWrap:"wrap"}}>
                       {p.budgetHours>0&&<div style={{display:"flex",alignItems:"center",gap:8,width:180}}><Prog val={budgetPct}/><span style={{fontSize:11,color:MUTED,whiteSpace:"nowrap"}}>{loggedHrs}h / {p.budgetHours}h</span></div>}
                       <span style={{fontSize:12,color:MUTED}}>{pAllocs.length} members</span>
-                      {p.costBudget>0&&<span style={{fontSize:12,color:MUTED}}>Cost budget: ${p.costBudget.toLocaleString()}</span>}
+                      {p.billable&&laborCost>0&&<span style={{fontSize:12,fontWeight:600,color:"#065F46",background:"#ECFDF5",borderRadius:20,padding:"2px 9px"}}>Labor: ${laborCost.toLocaleString()}</span>}
+                      {totalMaterialCost>0&&<span style={{fontSize:12,fontWeight:600,color:"#92400E",background:"#FFFBEB",borderRadius:20,padding:"2px 9px"}}>Materials: ${totalMaterialCost.toLocaleString()}</span>}
+                      {(laborCost>0||totalMaterialCost>0)&&p.costBudget>0&&<span style={{fontSize:12,fontWeight:600,color:totalProjectCost>p.costBudget?"#991B1B":MUTED}}>Total: ${totalProjectCost.toLocaleString()} / ${p.costBudget.toLocaleString()}</span>}
+                      {pTasks.length>0&&<span style={{fontSize:11,color:MUTED}}>{pTasks.length} task{pTasks.length!==1?"s":""}</span>}
                       {p.start&&<span style={{fontSize:11,color:MUTED}}>{p.start} to {p.end}</span>}
                     </div>
                   </div>
@@ -911,9 +912,25 @@ function Projects({user,projects,setProjects,allocs,setAllocs,employees,entries}
                     </div>}
                   </div>}
                   {selTab==="costs"&&<div>
-                    <div style={{display:"flex",justifyContent:"space-between",marginBottom:12}}>
-                      <div><span style={{fontSize:13,fontWeight:600}}>Total costs: </span><span style={{fontWeight:700,color:DANGER}}>${totalCosts.toLocaleString()}</span></div>
-                      {p.costBudget>0&&<div><span style={{fontSize:12,color:MUTED}}>Budget: ${p.costBudget.toLocaleString()} </span><span style={{fontSize:12,fontWeight:600,color:totalCosts>p.costBudget?DANGER:SUCCESS}}>{p.costBudget>0?Math.round((totalCosts/p.costBudget)*100):0}%</span></div>}
+                    {/* Resource-level labor costs */}
+                    {pAllocs.length>0&&<div style={{marginBottom:16}}>
+                      <div style={{fontSize:12,fontWeight:600,color:MUTED,marginBottom:8,textTransform:"uppercase",letterSpacing:.4}}>Labor Cost by Resource</div>
+                      {pAllocs.map(a=>{const e=employees.find(em=>String(em.id)===String(a.empId));if(!e)return null;const hrs=entries.filter(en=>String(en.projId)===String(p.id)&&String(en.empId)===String(a.empId)).reduce((t,en)=>t+en.hours,0);const cost=(e.billingRate||0)*hrs;return(
+                        <div key={a.id} style={{display:"flex",alignItems:"center",gap:10,padding:"8px 12px",background:"#F8FAFF",borderRadius:8,marginBottom:6,border:"1px solid "+BORDER}}>
+                          <Av name={e.name} color={e.color||BLUE} sz={24}/>
+                          <div style={{flex:1}}><div style={{fontSize:13,fontWeight:500}}>{e.name}</div><div style={{fontSize:11,color:MUTED}}>{hrs}h logged {e.billingRate>0?"@ $"+e.billingRate+"/hr":"(no rate set)"}</div></div>
+                          <span style={{fontWeight:700,color:cost>0?"#065F46":MUTED}}>{cost>0?"$"+cost.toLocaleString():"-"}</span>
+                        </div>
+                      );})}
+                      <div style={{display:"flex",justifyContent:"space-between",padding:"8px 12px",background:"#ECFDF5",borderRadius:8,border:"1px solid #6EE7B7"}}>
+                        <span style={{fontSize:13,fontWeight:600}}>Total Labor Cost</span>
+                        <span style={{fontWeight:700,color:"#065F46"}}>${laborCost.toLocaleString()}</span>
+                      </div>
+                    </div>}
+                    {/* Material / non-labor costs */}
+                    <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
+                      <div style={{fontSize:12,fontWeight:600,color:MUTED,textTransform:"uppercase",letterSpacing:.4}}>Materials & Expenses</div>
+                      <div style={{fontSize:13}}><span style={{fontWeight:600}}>Materials: </span><span style={{fontWeight:700,color:"#92400E"}}>${totalMaterialCost.toLocaleString()}</span>{p.costBudget>0&&<span style={{color:MUTED}}> / ${p.costBudget.toLocaleString()} budget</span>}</div>
                     </div>
                     {pCosts.map(c=>(
                       <div key={c.id} style={{display:"flex",alignItems:"center",gap:10,padding:"8px 10px",background:WHITE,borderRadius:8,border:"1px solid "+BORDER,marginBottom:7}}>
@@ -922,13 +939,19 @@ function Projects({user,projects,setProjects,allocs,setAllocs,employees,entries}
                         {canEdit&&<button onClick={()=>removeCost(c.id)} style={{border:"none",background:"none",color:MUTED,cursor:"pointer",fontSize:14}}>x</button>}
                       </div>
                     ))}
-                    {canEdit&&<div style={{display:"grid",gridTemplateColumns:"2fr 100px 120px 80px auto",gap:8,alignItems:"end",marginTop:12}}>
-                      <Inp label="Description" value={cForm.desc} onChange={e=>setCForm(f=>({...f,desc:e.target.value}))} placeholder="Material / service name" small/>
+                    {pCosts.length===0&&<div style={{color:MUTED,fontSize:13,padding:"12px 0",fontStyle:"italic"}}>No material costs logged yet.</div>}
+                    {canEdit&&<div style={{display:"grid",gridTemplateColumns:"2fr 100px 120px 80px auto",gap:8,alignItems:"end",marginTop:12,paddingTop:12,borderTop:"1px solid "+BORDER}}>
+                      <Inp label="Description" value={cForm.desc} onChange={e=>setCForm(f=>({...f,desc:e.target.value}))} placeholder="Material, license, travel..." small/>
                       <Inp label="Amount ($)" type="number" value={cForm.amount} onChange={e=>setCForm(f=>({...f,amount:e.target.value}))} placeholder="0" small/>
                       <SelF label="Category" value={cForm.category} onChange={e=>setCForm(f=>({...f,category:e.target.value}))} options={["Material","Equipment","License","Travel","Contractor","Other"].map(c=>({value:c,label:c}))} small/>
                       <Inp label="Date" type="date" value={cForm.date} onChange={e=>setCForm(f=>({...f,date:e.target.value}))} small/>
                       <div style={{paddingBottom:14}}><Btn primary small onClick={()=>addCost(p.id)}>Add</Btn></div>
                     </div>}
+                    {/* Total cost summary */}
+                    <div style={{display:"flex",justifyContent:"space-between",padding:"10px 14px",background:totalProjectCost>p.costBudget&&p.costBudget>0?"#FEF2F2":"#F8FAFF",borderRadius:8,marginTop:12,border:"1px solid "+(totalProjectCost>p.costBudget&&p.costBudget>0?"#FCA5A5":BORDER)}}>
+                      <span style={{fontSize:13,fontWeight:700}}>Total Project Cost (Labor + Materials)</span>
+                      <span style={{fontSize:15,fontWeight:700,color:totalProjectCost>p.costBudget&&p.costBudget>0?DANGER:"#065F46"}}>${totalProjectCost.toLocaleString()}</span>
+                    </div>
                   </div>}
                   {selTab==="settings"&&canEdit&&<div style={{maxWidth:400}}>
                     <div style={{marginBottom:16}}>
@@ -1388,7 +1411,7 @@ export default function App(){
   const [employees,setEmployees]=useState([]);const [projects,setProjects]=useState([]);const [allocs,setAllocs]=useState([]);
   const [entries,setEntries]=useState([]);const [leaves,setLeaves]=useState([]);const [teams,setTeams]=useState([]);
   const [timesheets,setTimesheets]=useState([]);const [notifs,setNotifs]=useState([]);const [showNotifs,setShowNotifs]=useState(false);
-  const [allTasks,setAllTasks]=useState([]);
+  const [allTasks,setAllTasks]=useState([]);const [allCosts,setAllCosts]=useState([]);
   const [showSetPwd,setShowSetPwd]=useState(()=>sessionStorage.getItem("rt_needs_pwd")==="1");
 
   useEffect(()=>{
@@ -1413,7 +1436,7 @@ export default function App(){
     const u={id:authUser.id,email:authUser.email,name:profile?.name||authUser.user_metadata?.name||authUser.email?.split("@")[0]||"User",role:profile?.role||"user",teamId:profile?.team_id||null,employeeId:profile?.employee_id||null,avatarColor:profile?.avatar_color||BLUE,phone:profile?.phone||"",billingRate:+(profile?.billing_rate||0)};
     setUser(u);
     const isAdmin=u.role==="admin",isManager=u.role==="manager";
-    const[empR,projR,allocR,entryR,leaveR,teamR,memberR,tsR,notifR,appUR,taskR]=await Promise.all([sb.from("employees").select("*").order("name"),sb.from("projects").select("*").order("name"),sb.from("allocations").select("*"),sb.from("time_entries").select("*"),sb.from("leaves").select("*").order("created_at",{ascending:false}),sb.from("teams").select("*").order("name"),sb.from("team_members").select("*"),sb.from("timesheets").select("*"),sb.from("notifications").select("*").eq("user_id",authUser.id).order("created_at",{ascending:false}).limit(30),sb.from("app_users").select("id,role,employee_id"),sb.from("project_tasks").select("*").eq("status","active")]);
+    const[empR,projR,allocR,entryR,leaveR,teamR,memberR,tsR,notifR,appUR,taskR,costR]=await Promise.all([sb.from("employees").select("*").order("name"),sb.from("projects").select("*").order("name"),sb.from("allocations").select("*"),sb.from("time_entries").select("*"),sb.from("leaves").select("*").order("created_at",{ascending:false}),sb.from("teams").select("*").order("name"),sb.from("team_members").select("*"),sb.from("timesheets").select("*"),sb.from("notifications").select("*").eq("user_id",authUser.id).order("created_at",{ascending:false}).limit(30),sb.from("app_users").select("id,role,employee_id"),sb.from("project_tasks").select("*").eq("status","active"),sb.from("project_costs").select("*").order("date",{ascending:false})]);
     const allEmps=(empR.data||[]).map(toEmp),allTeams=(teamR.data||[]).map(toTeam),members=memberR.data||[],appU=appUR.data||[];
     allTeams.forEach(t=>{t.members=members.filter(m=>m.team_id===t.id).map(m=>m.employee_id);});
     allEmps.forEach(e=>{const au=appU.find(a=>a.employee_id===e.id);if(au)e.appRole=au.role;});
@@ -1422,7 +1445,7 @@ export default function App(){
     setEntries((entryR.data||[]).map(toEntry).filter(e=>isAdmin||visEmps.find(em=>em.id===e.empId)));
     setLeaves((leaveR.data||[]).map(toLeave).filter(l=>isAdmin||visEmps.find(e=>e.id===l.empId)));
     setTeams(allTeams);setTimesheets((tsR.data||[]).map(toTs).filter(t=>isAdmin||visEmps.find(e=>e.id===t.empId)));
-    setNotifs((notifR.data||[]).map(toNotif));setAllTasks((taskR.data||[]).map(toTask));setDataLoading(false);
+    setNotifs((notifR.data||[]).map(toNotif));setAllTasks((taskR.data||[]).map(toTask));setAllCosts((costR.data||[]).map(toCost));setDataLoading(false);
   }
 
   const logout=async()=>{await sb.auth.signOut();setSession(null);setUser(null);};
@@ -1500,7 +1523,7 @@ export default function App(){
           {view==="dashboard"   &&<Dashboard    user={user} employees={employees} projects={projects} allocs={allocs} entries={entries} leaves={leaves} timesheets={timesheets} teams={teams} setView={setView} setUser={setUser}/>}
           {view==="employees"   &&<Employees    user={user} employees={employees} setEmployees={setEmployees} allocs={allocs} teams={teams}/>}
           {view==="teams"       &&<Teams        user={user} teams={teams} setTeams={setTeams} employees={employees} setEmployees={setEmployees}/>}
-          {view==="projects"    &&<Projects     user={user} projects={projects} setProjects={setProjects} allocs={allocs} setAllocs={setAllocs} employees={employees} entries={entries}/>}
+          {view==="projects"    &&<Projects     user={user} projects={projects} setProjects={setProjects} allocs={allocs} setAllocs={setAllocs} employees={employees} entries={entries} allTasks={allTasks} setAllTasks={setAllTasks} allCosts={allCosts} setAllCosts={setAllCosts}/>}
           {view==="approvals"   &&<Approvals    user={user} employees={employees} timesheets={timesheets} setTimesheets={setTimesheets} leaves={leaves} setLeaves={setLeaves} entries={entries} projects={projects}/>}
           {view==="timesheets"  &&<Timesheets   user={user} employees={employees} projects={projects} entries={entries} setEntries={setEntries} timesheets={timesheets} setTimesheets={setTimesheets} allTasks={allTasks} setView={setView}/>}
           {view==="utilization" &&<Utilization  user={user} employees={employees} allocs={allocs} entries={entries} timesheets={timesheets}/>}
