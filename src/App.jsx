@@ -90,6 +90,11 @@ function csvDownload(rows,filename){
   const lines=[keys.join(","),...rows.map(r=>keys.map(k=>JSON.stringify(r[k]??"")).join(","))];
   const a=document.createElement("a");a.href="data:text/csv;charset=utf-8,"+encodeURIComponent(lines.join("\n"));a.download=filename;a.click();
 }
+function effectiveRate(emp,alloc,proj){
+  if(alloc?.rateOverride>0)return alloc.rateOverride;
+  if(proj?.projectRate>0)return proj.projectRate;
+  return emp?.billingRate||0;
+}
 function utilColor(p){
   if(p===0)  return{bg:"#F1F5F9",fg:"#94A3B8"};
   if(p<50)   return{bg:"#FEF2F2",fg:"#991B1B"};
@@ -100,10 +105,10 @@ function utilColor(p){
 
 /* ── DB mappers ───────────────────────────────────────────── */
 const toEmp  =r=>({id:r.id,name:r.name||"",email:r.email||"",dept:r.department||"",role:r.role||"",capacity:r.capacity||40,active:r.active!==false,teamId:r.team_id||null,managerId:r.manager_id||null,phone:r.phone||"",billingRate:+(r.billing_rate||0),appRole:"user",color:deptColor(r.department)});
-const toProj =r=>({id:r.id,name:r.name,client:r.client||"",status:r.status||"planning",start:r.start_date||"",end:r.end_date||"",budgetHours:r.budget_hours||0,billable:r.billable!==false,costBudget:+(r.cost_budget||0)});
+const toProj =r=>({id:r.id,name:r.name,client:r.client||"",status:r.status||"planning",start:r.start_date||"",end:r.end_date||"",budgetHours:r.budget_hours||0,billable:r.billable!==false,costBudget:+(r.cost_budget||0),projectRate:+(r.project_rate||0)});
 const toTask =r=>({id:r.id,projId:r.project_id,name:r.name,desc:r.description||"",estHrs:+(r.estimated_hours||0),billable:r.billable!==false,status:r.status||"active"});
 const toCost =r=>({id:r.id,projId:r.project_id,desc:r.description,amount:+(r.amount||0),category:r.category||"Material",date:r.date||""});
-const toAlloc=r=>({id:r.id,empId:r.employee_id,projId:r.project_id,hoursPerWeek:r.hours_per_week});
+const toAlloc=r=>({id:r.id,empId:r.employee_id,projId:r.project_id,hoursPerWeek:r.hours_per_week,rateOverride:r.rate_override!=null?+r.rate_override:null});
 const toEntry=r=>({id:r.id,empId:r.employee_id,projId:r.project_id,taskId:r.task_id||null,week:r.week,hours:Number(r.hours),note:r.note||"",day:r.day||null,tsId:r.timesheet_id||null});
 const toLeave=r=>({id:r.id,empId:r.employee_id,type:r.type,from:r.from_date,to:r.to_date,days:r.days,status:r.status,reason:r.reason||""});
 const toTeam =r=>({id:r.id,name:r.name,description:r.description||"",managerId:r.manager_id||null,color:r.color||BLUE,members:[]});
@@ -413,11 +418,14 @@ function Dashboard({user,employees,projects,allocs,entries,leaves,timesheets,tea
 /* ── TIMESHEETS - Calendar Style ──────────────────────────── */
 function Timesheets({user,employees,projects,entries,setEntries,timesheets,setTimesheets,allTasks,setView}){
   const [week,setWeek]=useState(currentWeek());
+  const [mode,setMode]=useState("daily"); // "daily" | "weekly"
   const [rows,setRows]=useState([]);
-  // row: {tempId, day, projId, taskId, taskLabel, hours, note}
+  // daily row: {tempId, day, projId, taskId, taskLabel, hours}
+  // weekly row: {tempId, projId, hours, note}
   const [saving,setSaving]=useState(false);
   const [submitting,setSubmitting]=useState(false);
   const [msg,setMsg]=useState({type:"",text:""});
+  const [weeklyRows,setWeeklyRows]=useState([]);
 
   const emp=employees.find(e=>e.id===user.employeeId);
   const capacity=emp?.capacity||40;
@@ -426,59 +434,63 @@ function Timesheets({user,employees,projects,entries,setEntries,timesheets,setTi
   const locked=ts?.status==="submitted"||ts?.status==="approved";
   const wkDates=weekDates(week);
   const stMeta=TS_STATUS[ts?.status||"draft"];
-
-  // Reload rows from DB whenever week changes
-  useEffect(()=>{
-    const ex=entries.filter(e=>String(e.empId)===String(user.employeeId)&&e.week===week);
-    setRows(ex.map(e=>({
-      tempId:String(e.id||("n"+Date.now()+Math.random())),
-      id:e.id,
-      day:e.day||DAYS[0],
-      projId:String(e.projId||""),
-      taskId:e.taskId||"",
-      taskLabel:e.note||"",
-      hours:String(e.hours||""),
-      note:e.note||""
-    })));
-  },[week,user.employeeId]);
-
+  const shownProjs=projects.filter(p=>p.status!=="completed");
   const tasksForProj=projId=>allTasks.filter(t=>String(t.projId)===String(projId));
 
-  const addRow=day=>setRows(prev=>[...prev,{tempId:"n"+Date.now()+Math.random(),id:null,day,projId:"",taskId:"",taskLabel:"",hours:"",note:""}]);
-  const upd=(tid,field,val)=>setRows(prev=>prev.map(r=>r.tempId===tid?{...r,[field]:val}:r));
-  const del=tid=>setRows(prev=>prev.filter(r=>r.tempId!==tid));
+  // Load daily rows when week/mode changes
+  useEffect(()=>{
+    const ex=entries.filter(e=>String(e.empId)===String(user.employeeId)&&e.week===week);
+    if(mode==="daily"){
+      setRows(ex.filter(e=>e.day).map(e=>({tempId:String(e.id||("n"+Math.random())),id:e.id,day:e.day||DAYS[0],projId:String(e.projId||""),taskId:e.taskId||"",taskLabel:e.note||"",hours:String(e.hours||"")})));
+    } else {
+      // weekly: aggregate by project
+      const byProj={};
+      ex.forEach(e=>{const pk=String(e.projId);if(!byProj[pk])byProj[pk]={projId:pk,hours:0,note:e.note||""};byProj[pk].hours+=(+e.hours||0);});
+      setWeeklyRows(Object.values(byProj).map(r=>({...r,tempId:"w"+r.projId,hours:String(r.hours)})));
+    }
+  },[week,user.employeeId,mode]);
 
-  const totalHrs=rows.reduce((s,r)=>s+(+r.hours||0),0);
+  const addRow=day=>setRows(prev=>[...prev,{tempId:"n"+Date.now()+Math.random(),id:null,day,projId:"",taskId:"",taskLabel:"",hours:""}]);
+  const upd=(tid,f,v)=>setRows(prev=>prev.map(r=>r.tempId===tid?{...r,[f]:v}:r));
+  const del=tid=>setRows(prev=>prev.filter(r=>r.tempId!==tid));
+  const updW=(projId,f,v)=>setWeeklyRows(prev=>prev.map(r=>r.projId===projId?{...r,[f]:v}:r));
+  const addWeeklyRow=()=>{
+    const taken=weeklyRows.map(r=>r.projId);
+    const p=shownProjs.find(p=>!taken.includes(String(p.id)));
+    if(p)setWeeklyRows(prev=>[...prev,{tempId:"w"+p.id,projId:String(p.id),hours:"",note:""}]);
+  };
+
+  const totalHrs=mode==="daily"?rows.reduce((s,r)=>s+(+r.hours||0),0):weeklyRows.reduce((s,r)=>s+(+r.hours||0),0);
   const dayTotal=day=>rows.filter(r=>r.day===day).reduce((s,r)=>s+(+r.hours||0),0);
   const utilPct=capacity>0?Math.round((totalHrs/capacity)*100):0;
 
   const doSave=async(status)=>{
-    if(!user.employeeId){setMsg({type:"error",text:"No employee profile linked. Contact your admin."});return false;}
+    if(!user.employeeId){setMsg({type:"error",text:"No employee profile linked. Contact your admin."});return null;}
     setSaving(true);setMsg({type:"",text:""});
-    const valid=rows.filter(r=>r.projId&&+r.hours>0);
-    const totalH=valid.reduce((s,r)=>s+(+r.hours),0);
+    let dbRows=[];
+    if(mode==="daily"){
+      dbRows=rows.filter(r=>r.projId&&+r.hours>0).map(r=>({employee_id:user.employeeId,project_id:r.projId,task_id:r.taskId||null,week,day:r.day,hours:+r.hours,note:r.taskLabel||""}));
+    } else {
+      dbRows=weeklyRows.filter(r=>r.projId&&+r.hours>0).map(r=>({employee_id:user.employeeId,project_id:r.projId,task_id:null,week,day:null,hours:+r.hours,note:r.note||""}));
+    }
+    const totalH=dbRows.reduce((s,r)=>s+(+r.hours),0);
     const{data:tsData,error}=await sb.from("timesheets").upsert(
       {employee_id:user.employeeId,week,status:status||(ts?.status==="rejected"?"draft":(ts?.status||"draft")),total_hours:totalH,updated_at:new Date().toISOString()},
       {onConflict:"employee_id,week"}).select().single();
-    if(error){setMsg({type:"error",text:error.message});setSaving(false);return false;}
+    if(error){setMsg({type:"error",text:error.message});setSaving(false);return null;}
     await sb.from("time_entries").delete().eq("employee_id",user.employeeId).eq("week",week);
-    if(valid.length>0){
-      const{data:newE}=await sb.from("time_entries").insert(
-        valid.map(r=>({employee_id:user.employeeId,project_id:r.projId,task_id:r.taskId||null,week,day:r.day,hours:+r.hours,note:r.taskLabel||r.note,timesheet_id:tsData.id}))
-      ).select();
+    if(dbRows.length>0){
+      const{data:newE}=await sb.from("time_entries").insert(dbRows.map(r=>({...r,timesheet_id:tsData.id}))).select();
       if(newE)setEntries(prev=>[...prev.filter(e=>!(String(e.empId)===String(user.employeeId)&&e.week===week)),...newE.map(toEntry)]);
-    } else {
-      setEntries(prev=>prev.filter(e=>!(String(e.empId)===String(user.employeeId)&&e.week===week)));
-    }
+    } else setEntries(prev=>prev.filter(e=>!(String(e.empId)===String(user.employeeId)&&e.week===week)));
     setTimesheets(prev=>[...prev.filter(t=>!(t.empId===user.employeeId&&t.week===week)),toTs(tsData)]);
     setSaving(false);return tsData;
   };
-
   const saveDraft=async()=>{const r=await doSave("draft");if(r)setMsg({type:"ok",text:"Draft saved."});};
   const submit=async()=>{
-    if(!rows.filter(r=>r.projId&&+r.hours>0).length){setMsg({type:"warn",text:"Add at least one entry first."});return;}
-    setSubmitting(true);
-    const tsData=await doSave("submitted");
+    const valid=mode==="daily"?rows.filter(r=>r.projId&&+r.hours>0):weeklyRows.filter(r=>r.projId&&+r.hours>0);
+    if(!valid.length){setMsg({type:"warn",text:"Add at least one entry first."});return;}
+    setSubmitting(true);const tsData=await doSave("submitted");
     if(tsData){
       await sb.from("timesheets").update({status:"submitted",submitted_at:new Date().toISOString()}).eq("id",tsData.id);
       setTimesheets(prev=>prev.map(t=>t.empId===user.employeeId&&t.week===week?{...t,status:"submitted"}:t));
@@ -489,48 +501,53 @@ function Timesheets({user,employees,projects,entries,setEntries,timesheets,setTi
     setSubmitting(false);
   };
   const exportTS=()=>{
-    const exRows=rows.map(r=>{const p=projects.find(pr=>String(pr.id)===r.projId);const t=allTasks.find(tk=>tk.id===r.taskId);return{Week:weekLabel(week),Day:r.day,Project:p?.name||"",Task:t?.name||r.taskLabel||"",Hours:r.hours};});
-    if(!exRows.length){setMsg({type:"warn",text:"Nothing to export."});return;}
-    csvDownload(exRows,"timesheet-"+week+".csv");
+    const expRows=mode==="daily"
+      ?rows.map(r=>{const p=projects.find(pr=>String(pr.id)===r.projId);const t=allTasks.find(tk=>tk.id===r.taskId);return{Week:weekLabel(week),Day:r.day,Project:p?.name||"",Task:t?.name||r.taskLabel||"",Hours:r.hours};})
+      :weeklyRows.map(r=>{const p=projects.find(pr=>String(pr.id)===r.projId);return{Week:weekLabel(week),Project:p?.name||"",Hours:r.hours,Note:r.note||""};});
+    if(!expRows.length){setMsg({type:"warn",text:"Nothing to export."});return;}
+    csvDownload(expRows,"timesheet-"+week+".csv");
   };
 
   return(
     <div style={{fontFamily:FONT}}>
-      {/* Header */}
       <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:20}}>
         <div>
           <h1 style={{fontSize:21,fontWeight:700,color:TEXT,margin:"0 0 2px"}}>My Timesheet</h1>
-          <p style={{color:MUTED,fontSize:13,margin:0}}>Select a project, choose a task, then log your hours per day</p>
+          <p style={{color:MUTED,fontSize:13,margin:0}}>{weekLabel(week)}</p>
         </div>
-        <Btn onClick={exportTS}>Export CSV</Btn>
+        <div style={{display:"flex",gap:10,alignItems:"center"}}>
+          <div style={{display:"flex",background:"#E2E8F0",borderRadius:8,padding:3,gap:2}}>
+            {[{id:"daily",label:"Daily"},{id:"weekly",label:"Weekly Total"}].map(m=>(
+              <button key={m.id} onClick={()=>setMode(m.id)} style={{padding:"6px 16px",borderRadius:6,border:"none",cursor:"pointer",background:mode===m.id?WHITE:"transparent",color:mode===m.id?TEXT:MUTED,fontSize:12,fontWeight:mode===m.id?600:400,fontFamily:FONT,boxShadow:mode===m.id?"0 1px 3px #0000000d":"none"}}>
+                {m.label}
+              </button>
+            ))}
+          </div>
+          <Btn onClick={exportTS}>Export CSV</Btn>
+        </div>
       </div>
 
       <div style={{display:"grid",gridTemplateColumns:"230px 1fr",gap:16}}>
-
-        {/* ── Left: week picker ── */}
+        {/* Left: week picker */}
         <div>
           <Card style={{padding:14,marginBottom:12}}>
             <div style={{fontSize:10,fontWeight:700,color:MUTED,textTransform:"uppercase",letterSpacing:.6,marginBottom:8}}>Week</div>
             <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:10}}>
-              <button onClick={()=>setWeek(addWeeks(week,-1))} style={{width:28,height:28,borderRadius:6,border:"1px solid "+BORDER,background:WHITE,cursor:"pointer",fontWeight:700,color:TEXT,display:"flex",alignItems:"center",justifyContent:"center",fontSize:13}}>{"<"}</button>
+              <button onClick={()=>setWeek(addWeeks(week,-1))} style={{width:28,height:28,borderRadius:6,border:"1px solid "+BORDER,background:WHITE,cursor:"pointer",fontWeight:700,color:TEXT,display:"flex",alignItems:"center",justifyContent:"center",fontSize:14}}>{"<"}</button>
               <div style={{flex:1,textAlign:"center"}}>
                 <div style={{fontSize:11,fontWeight:700,color:TEXT,lineHeight:1.3}}>{weekLabel(week)}</div>
-                <div style={{fontSize:10,color:week===cw?BLUE:MUTED,marginTop:1,fontWeight:600}}>{week===cw?"Current week":week>cw?"Future":"Past"}</div>
+                <div style={{fontSize:10,color:week===cw?BLUE:MUTED,fontWeight:600,marginTop:1}}>{week===cw?"Current week":week>cw?"Future":"Past"}</div>
               </div>
-              <button onClick={()=>setWeek(addWeeks(week,1))} style={{width:28,height:28,borderRadius:6,border:"1px solid "+BORDER,background:WHITE,cursor:"pointer",fontWeight:700,color:TEXT,display:"flex",alignItems:"center",justifyContent:"center",fontSize:13}}>{">"}</button>
+              <button onClick={()=>setWeek(addWeeks(week,1))} style={{width:28,height:28,borderRadius:6,border:"1px solid "+BORDER,background:WHITE,cursor:"pointer",fontWeight:700,color:TEXT,display:"flex",alignItems:"center",justifyContent:"center",fontSize:14}}>{">"}</button>
             </div>
-            {week!==cw&&<button onClick={()=>setWeek(cw)} style={{width:"100%",padding:"5px",background:"#EFF6FF",border:"1px solid "+BLUE+"44",borderRadius:6,color:BLUE,fontSize:11,fontWeight:600,cursor:"pointer",marginBottom:8,fontFamily:FONT}}>Today's week</button>}
+            {week!==cw&&<button onClick={()=>setWeek(cw)} style={{width:"100%",padding:"5px",background:"#EFF6FF",border:"1px solid "+BLUE+"44",borderRadius:6,color:BLUE,fontSize:11,fontWeight:600,cursor:"pointer",marginBottom:8,fontFamily:FONT}}>Current week</button>}
             <div style={{fontSize:10,fontWeight:700,color:MUTED,textTransform:"uppercase",letterSpacing:.5,marginBottom:5}}>Recent</div>
-            {[addWeeks(cw,-3),addWeeks(cw,-2),addWeeks(cw,-1),cw].map(w=>{
-              const wts=timesheets.find(t=>t.empId===user.employeeId&&t.week===w);
-              const wst=wts?.status||"none";
-              return(
-                <div key={w} onClick={()=>setWeek(w)} style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"5px 8px",borderRadius:6,cursor:"pointer",background:week===w?"#EFF6FF":WHITE,border:"1px solid "+(week===w?BLUE+"55":BORDER),marginBottom:4}}>
-                  <span style={{fontSize:11,fontWeight:week===w?600:400,color:week===w?BLUE:TEXT}}>{weekLabel(w)}</span>
-                  {wst!=="none"?<span style={{fontSize:9,background:TS_STATUS[wst]?.bg,color:TS_STATUS[wst]?.fg,borderRadius:4,padding:"1px 5px",fontWeight:600}}>{TS_STATUS[wst]?.label}</span>:<span style={{fontSize:9,color:MUTED,fontStyle:"italic"}}>Empty</span>}
-                </div>
-              );
-            })}
+            {[addWeeks(cw,-3),addWeeks(cw,-2),addWeeks(cw,-1),cw].map(w=>{const wts=timesheets.find(t=>t.empId===user.employeeId&&t.week===w);const wst=wts?.status||"none";return(
+              <div key={w} onClick={()=>setWeek(w)} style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"5px 8px",borderRadius:6,cursor:"pointer",background:week===w?"#EFF6FF":WHITE,border:"1px solid "+(week===w?BLUE+"55":BORDER),marginBottom:4}}>
+                <span style={{fontSize:11,fontWeight:week===w?600:400,color:week===w?BLUE:TEXT}}>{weekLabel(w)}</span>
+                {wst!=="none"?<span style={{fontSize:9,background:TS_STATUS[wst]?.bg,color:TS_STATUS[wst]?.fg,borderRadius:4,padding:"1px 5px",fontWeight:600}}>{TS_STATUS[wst]?.label}</span>:<span style={{fontSize:9,color:MUTED,fontStyle:"italic"}}>Empty</span>}
+              </div>
+            );})}
           </Card>
           {emp&&<Card style={{padding:14}}>
             <div style={{display:"flex",alignItems:"center",gap:9,marginBottom:10}}>
@@ -543,9 +560,8 @@ function Timesheets({user,employees,projects,entries,setEntries,timesheets,setTi
           </Card>}
         </div>
 
-        {/* ── Right: day cards ── */}
+        {/* Right: entries */}
         <div>
-          {/* Status bar */}
           <div style={{display:"flex",alignItems:"center",gap:10,padding:"9px 14px",background:stMeta?.bg||"#F8FAFC",borderRadius:8,marginBottom:10,border:"1px solid "+BORDER}}>
             <span style={{fontSize:15}}>{stMeta?.icon}</span>
             <span style={{fontSize:13,fontWeight:600,color:stMeta?.fg}}>{stMeta?.label}</span>
@@ -554,93 +570,110 @@ function Timesheets({user,employees,projects,entries,setEntries,timesheets,setTi
           </div>
           <Alrt type={msg.type} msg={msg.text}/>
 
-          {/* Column labels - shown once above the cards */}
-          <div style={{display:"grid",gridTemplateColumns:"180px 1fr 80px 36px",gap:8,padding:"0 16px 6px",marginBottom:2}}>
-            <span style={{fontSize:10,fontWeight:700,color:MUTED,textTransform:"uppercase",letterSpacing:.5}}>Project</span>
-            <span style={{fontSize:10,fontWeight:700,color:MUTED,textTransform:"uppercase",letterSpacing:.5}}>Task / Ticket</span>
-            <span style={{fontSize:10,fontWeight:700,color:MUTED,textTransform:"uppercase",letterSpacing:.5,textAlign:"center"}}>Hours</span>
-            <span/>
-          </div>
-
-          {wkDates.map(dt=>{
-            const day=DAYS[(dt.getDay()+6)%7];
-            const dayRows=rows.filter(r=>r.day===day);
-            const dtotal=dayTotal(day);
-            const isWeekend=dt.getDay()===0||dt.getDay()===6;
-            return(
-              <div key={day} style={{background:WHITE,border:"1px solid "+(dtotal>0?BLUE+"44":BORDER),borderRadius:10,marginBottom:8,overflow:"hidden",opacity:isWeekend?.85:1}}>
-                {/* Day header */}
-                <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"8px 14px",background:dtotal>0?"#EFF6FF":isWeekend?"#FAFAFA":"#F8FAFF",borderBottom:dayRows.length>0||!locked?"1px solid "+BORDER:"none"}}>
-                  <div style={{display:"flex",alignItems:"center",gap:8}}>
-                    <div style={{width:30,height:30,borderRadius:7,background:dtotal>0?BLUE:"#E2E8F0",color:dtotal>0?"#fff":MUTED,fontWeight:700,fontSize:12,display:"flex",alignItems:"center",justifyContent:"center"}}>{dt.getDate()}</div>
-                    <div>
-                      <span style={{fontSize:13,fontWeight:700,color:TEXT}}>{DAYS[(dt.getDay()+6)%7]}</span>
-                      <span style={{fontSize:11,color:MUTED,marginLeft:6}}>{MONTHS[dt.getMonth()]} {dt.getDate()}{isWeekend?" (Weekend)":""}</span>
+          {/* ── DAILY MODE ── */}
+          {mode==="daily"&&<>
+            <div style={{display:"grid",gridTemplateColumns:"180px 1fr 80px 36px",gap:8,padding:"0 16px 6px",marginBottom:2}}>
+              <span style={{fontSize:10,fontWeight:700,color:MUTED,textTransform:"uppercase",letterSpacing:.5}}>Project</span>
+              <span style={{fontSize:10,fontWeight:700,color:MUTED,textTransform:"uppercase",letterSpacing:.5}}>Task / Ticket</span>
+              <span style={{fontSize:10,fontWeight:700,color:MUTED,textTransform:"uppercase",letterSpacing:.5,textAlign:"center"}}>Hours</span>
+              <span/>
+            </div>
+            {wkDates.map(dt=>{
+              const day=DAYS[(dt.getDay()+6)%7];
+              const dayRows=rows.filter(r=>r.day===day);
+              const dtotal=dayTotal(day);
+              const isWeekend=dt.getDay()===0||dt.getDay()===6;
+              return(
+                <div key={day} style={{background:WHITE,border:"1px solid "+(dtotal>0?BLUE+"44":BORDER),borderRadius:10,marginBottom:8,overflow:"hidden"}}>
+                  <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"8px 14px",background:dtotal>0?"#EFF6FF":isWeekend?"#FAFAFA":"#F8FAFF",borderBottom:dayRows.length>0?"1px solid "+BORDER:"none"}}>
+                    <div style={{display:"flex",alignItems:"center",gap:8}}>
+                      <div style={{width:30,height:30,borderRadius:7,background:dtotal>0?BLUE:"#E2E8F0",color:dtotal>0?"#fff":MUTED,fontWeight:700,fontSize:12,display:"flex",alignItems:"center",justifyContent:"center"}}>{dt.getDate()}</div>
+                      <div>
+                        <span style={{fontSize:13,fontWeight:700,color:TEXT}}>{DAYS[(dt.getDay()+6)%7]}</span>
+                        <span style={{fontSize:11,color:MUTED,marginLeft:6}}>{MONTHS[dt.getMonth()]} {dt.getDate()}{isWeekend?" (Weekend)":""}</span>
+                      </div>
+                    </div>
+                    <div style={{display:"flex",alignItems:"center",gap:8}}>
+                      {dtotal>0&&<span style={{fontSize:14,fontWeight:700,color:BLUE}}>{dtotal}h</span>}
+                      {!locked&&<button onClick={()=>addRow(day)} style={{padding:"4px 12px",border:"1px solid "+BLUE+"55",borderRadius:6,background:WHITE,color:BLUE,fontSize:12,fontWeight:600,cursor:"pointer",fontFamily:FONT}}>+ Add Entry</button>}
                     </div>
                   </div>
-                  <div style={{display:"flex",alignItems:"center",gap:8}}>
-                    {dtotal>0&&<span style={{fontSize:14,fontWeight:700,color:BLUE}}>{dtotal}h</span>}
-                    {!locked&&<button onClick={()=>addRow(day)} style={{padding:"4px 12px",border:"1px solid "+BLUE+"55",borderRadius:6,background:WHITE,color:BLUE,fontSize:12,fontWeight:600,cursor:"pointer",fontFamily:FONT}}>+ Add Entry</button>}
-                  </div>
+                  {dayRows.length>0&&<div style={{padding:"8px 14px"}}>
+                    {dayRows.map((row,ri)=>{
+                      const projTasks=tasksForProj(row.projId);
+                      return(
+                        <div key={row.tempId} style={{display:"grid",gridTemplateColumns:"180px 1fr 80px 36px",gap:8,alignItems:"center",padding:"6px 0",borderBottom:ri<dayRows.length-1?"1px solid #F1F5F9":"none"}}>
+                          {locked
+                            ?<div style={{fontSize:13,fontWeight:500}}>{projects.find(p=>String(p.id)===row.projId)?.name||"-"}</div>
+                            :<select value={row.projId} onChange={e=>{upd(row.tempId,"projId",e.target.value);upd(row.tempId,"taskId","");upd(row.tempId,"taskLabel","");}} style={{padding:"6px 8px",border:"1.5px solid "+(row.projId?BLUE+"88":BORDER),borderRadius:6,fontSize:12,color:row.projId?TEXT:MUTED,fontFamily:FONT,background:WHITE,width:"100%"}}>
+                              <option value="">Select project...</option>
+                              {shownProjs.map(p=><option key={p.id} value={String(p.id)}>{p.name}{p.billable?" (B)":" (NB)"}</option>)}
+                            </select>}
+                          {locked
+                            ?<div style={{fontSize:13,color:TEXT}}>{allTasks.find(t=>t.id===row.taskId)?.name||row.taskLabel||<span style={{color:MUTED,fontStyle:"italic"}}>No task</span>}</div>
+                            :projTasks.length>0
+                              ?<select value={row.taskId} onChange={e=>{const t=projTasks.find(tk=>tk.id===e.target.value);upd(row.tempId,"taskId",e.target.value);upd(row.tempId,"taskLabel",t?.name||"");}} style={{padding:"6px 8px",border:"1.5px solid "+(row.taskId?BLUE+"88":BORDER),borderRadius:6,fontSize:12,color:row.taskId?TEXT:MUTED,fontFamily:FONT,background:WHITE,width:"100%"}}>
+                                  <option value="">Select task...</option>
+                                  {projTasks.map(t=><option key={t.id} value={t.id}>{t.name}{t.estHrs>0?" ("+t.estHrs+"h est)":""}</option>)}
+                                  <option value="other">Other - free text below</option>
+                                </select>
+                              :<input value={row.taskLabel} onChange={e=>upd(row.tempId,"taskLabel",e.target.value)} placeholder="Task or ticket e.g. JIRA-220..." style={{padding:"6px 10px",border:"1px solid "+(row.taskLabel?BLUE+"88":BORDER),borderRadius:6,fontSize:12,color:TEXT,fontFamily:FONT,width:"100%",boxSizing:"border-box"}}/>}
+                          {locked
+                            ?<div style={{textAlign:"center",fontWeight:700,fontSize:14,color:+row.hours>0?BLUE:MUTED}}>{row.hours||"0"}h</div>
+                            :<input type="number" min="0" max="24" step="0.5" value={row.hours} onChange={e=>upd(row.tempId,"hours",e.target.value)} placeholder="hrs" style={{padding:"6px 4px",border:"1.5px solid "+(+row.hours>0?BLUE:BORDER),borderRadius:6,fontSize:14,fontWeight:700,textAlign:"center",width:"100%",boxSizing:"border-box",color:+row.hours>0?BLUE:MUTED,fontFamily:FONT,background:+row.hours>0?"#EFF6FF":WHITE}}/>}
+                          {!locked?<button onClick={()=>del(row.tempId)} style={{width:32,height:32,border:"none",background:"#FEF2F2",color:DANGER,borderRadius:6,cursor:"pointer",fontSize:16,fontWeight:700,display:"flex",alignItems:"center",justifyContent:"center"}}>x</button>:<div/>}
+                        </div>
+                      );
+                    })}
+                  </div>}
+                  {dayRows.length===0&&locked&&<div style={{padding:"8px 16px",fontSize:12,color:MUTED}}>No hours logged</div>}
                 </div>
+              );
+            })}
+          </>}
 
-                {/* Entry rows */}
-                {(dayRows.length>0)&&<div style={{padding:"8px 14px"}}>
-                  {dayRows.map((row,ri)=>{
-                    const projTasks=tasksForProj(row.projId);
-                    return(
-                      <div key={row.tempId} style={{display:"grid",gridTemplateColumns:"180px 1fr 80px 36px",gap:8,alignItems:"center",padding:"6px 0",borderBottom:ri<dayRows.length-1?"1px solid #F1F5F9":"none"}}>
-                        {/* Project */}
-                        {locked
-                          ?<div style={{fontSize:13,fontWeight:500,color:TEXT}}>{projects.find(p=>String(p.id)===row.projId)?.name||"-"}</div>
-                          :<select value={row.projId} onChange={e=>{upd(row.tempId,"projId",e.target.value);upd(row.tempId,"taskId","");upd(row.tempId,"taskLabel","");}} style={{padding:"6px 8px",border:"1.5px solid "+(row.projId?BLUE+"88":BORDER),borderRadius:6,fontSize:12,color:row.projId?TEXT:MUTED,fontFamily:FONT,background:WHITE,width:"100%"}}>
-                            <option value="">Select project...</option>
-                            {projects.filter(p=>p.status!=="completed").map(p=><option key={p.id} value={String(p.id)}>{p.name}</option>)}
-                          </select>
-                        }
-                        {/* Task: dropdown if project has tasks, else free text */}
-                        {locked
-                          ?<div style={{fontSize:13,color:TEXT}}>{allTasks.find(t=>t.id===row.taskId)?.name||row.taskLabel||<span style={{color:MUTED,fontStyle:"italic"}}>No task</span>}</div>
-                          :projTasks.length>0
-                            ?<select value={row.taskId} onChange={e=>{const t=projTasks.find(tk=>tk.id===e.target.value);upd(row.tempId,"taskId",e.target.value);upd(row.tempId,"taskLabel",t?.name||"");}} style={{padding:"6px 8px",border:"1.5px solid "+(row.taskId?BLUE+"88":BORDER),borderRadius:6,fontSize:12,color:row.taskId?TEXT:MUTED,fontFamily:FONT,background:WHITE,width:"100%"}}>
-                                <option value="">Select task...</option>
-                                {projTasks.map(t=><option key={t.id} value={t.id}>{t.name}{t.estHrs>0?" ("+t.estHrs+"h est)":""}</option>)}
-                                <option value="other">Other / free text...</option>
-                              </select>
-                            :<input value={row.taskLabel} onChange={e=>upd(row.tempId,"taskLabel",e.target.value)} placeholder="Task, ticket, e.g. JIRA-220..." style={{padding:"6px 10px",border:"1px solid "+(row.taskLabel?BLUE+"88":BORDER),borderRadius:6,fontSize:12,color:TEXT,fontFamily:FONT,width:"100%",boxSizing:"border-box"}}
-                              onFocus={e=>e.target.style.borderColor=BLUE} onBlur={e=>e.target.style.borderColor=row.taskLabel?BLUE+"88":BORDER}/>
-                        }
-                        {/* Hours */}
-                        {locked
-                          ?<div style={{textAlign:"center",fontWeight:700,fontSize:14,color:+row.hours>0?BLUE:MUTED,padding:"6px 0"}}>{row.hours||"0"}h</div>
-                          :<input type="number" min="0" max="24" step="0.5" value={row.hours} onChange={e=>upd(row.tempId,"hours",e.target.value)} placeholder="hrs" style={{padding:"6px 4px",border:"1.5px solid "+(+row.hours>0?BLUE:BORDER),borderRadius:6,fontSize:14,fontWeight:700,textAlign:"center",width:"100%",boxSizing:"border-box",color:+row.hours>0?BLUE:MUTED,fontFamily:FONT,background:+row.hours>0?"#EFF6FF":WHITE}}/>
-                        }
-                        {/* Delete */}
-                        {!locked
-                          ?<button onClick={()=>del(row.tempId)} title="Remove entry" style={{width:32,height:32,border:"none",background:"#FEF2F2",color:DANGER,borderRadius:6,cursor:"pointer",fontSize:16,fontWeight:700,display:"flex",alignItems:"center",justifyContent:"center"}}>x</button>
-                          :<div/>}
-                      </div>
-                    );
-                  })}
-                </div>}
-                {dayRows.length===0&&locked&&<div style={{padding:"8px 16px",fontSize:12,color:MUTED}}>No hours logged</div>}
-              </div>
-            );
-          })}
+          {/* ── WEEKLY MODE ── */}
+          {mode==="weekly"&&<Card style={{padding:0,overflow:"hidden"}}>
+            <div style={{padding:"10px 16px",background:"#F8FAFF",borderBottom:"1px solid "+BORDER,display:"grid",gridTemplateColumns:"1fr 100px 1fr 36px",gap:8}}>
+              {["Project","Hours","Note / Comment",""].map(h=><span key={h} style={{fontSize:10,fontWeight:700,color:MUTED,textTransform:"uppercase",letterSpacing:.5}}>{h}</span>)}
+            </div>
+            <div style={{padding:"8px 16px"}}>
+              {weeklyRows.map((row,ri)=>{
+                const proj=projects.find(p=>String(p.id)===row.projId);
+                return(
+                  <div key={row.tempId} style={{display:"grid",gridTemplateColumns:"1fr 100px 1fr 36px",gap:8,alignItems:"center",padding:"8px 0",borderBottom:ri<weeklyRows.length-1?"1px solid #F1F5F9":"none"}}>
+                    {locked
+                      ?<div style={{fontWeight:500}}>{proj?.name||"-"}{proj&&<span style={{fontSize:11,color:MUTED,marginLeft:6}}>{proj.billable?"(Billable)":"(Non-billable)"}</span>}</div>
+                      :<select value={row.projId} onChange={e=>updW(row.projId,"projId",e.target.value)} style={{padding:"7px 10px",border:"1.5px solid "+BLUE+"66",borderRadius:6,fontSize:13,color:TEXT,fontFamily:FONT,background:WHITE,width:"100%"}}>
+                        {shownProjs.map(p=><option key={p.id} value={String(p.id)}>{p.name}{p.billable?" (Billable)":" (Non-billable)"}</option>)}
+                      </select>}
+                    {locked
+                      ?<div style={{fontWeight:700,fontSize:16,color:BLUE,textAlign:"center"}}>{row.hours}h</div>
+                      :<input type="number" min="0" max="80" step="0.5" value={row.hours} onChange={e=>updW(row.projId,"hours",e.target.value)} placeholder="hrs" style={{padding:"7px 8px",border:"1.5px solid "+(+row.hours>0?BLUE:BORDER),borderRadius:6,fontSize:15,fontWeight:700,textAlign:"center",width:"100%",boxSizing:"border-box",color:+row.hours>0?BLUE:MUTED,fontFamily:FONT}}/>}
+                    {locked
+                      ?<div style={{fontSize:13,color:MUTED}}>{row.note||"-"}</div>
+                      :<input value={row.note||""} onChange={e=>updW(row.projId,"note",e.target.value)} placeholder="What did you work on?" style={{padding:"7px 10px",border:"1px solid "+BORDER,borderRadius:6,fontSize:12,color:TEXT,fontFamily:FONT,width:"100%",boxSizing:"border-box"}}/>}
+                    {!locked?<button onClick={()=>setWeeklyRows(prev=>prev.filter(r=>r.projId!==row.projId))} style={{width:32,height:32,border:"none",background:"#FEF2F2",color:DANGER,borderRadius:6,cursor:"pointer",fontSize:16,fontWeight:700,display:"flex",alignItems:"center",justifyContent:"center"}}>x</button>:<div/>}
+                  </div>
+                );
+              })}
+              {weeklyRows.length===0&&!locked&&<div style={{padding:"24px 0",textAlign:"center",color:MUTED,fontSize:13}}>No projects added yet. Click below to add one.</div>}
+              {!locked&&shownProjs.filter(p=>!weeklyRows.find(r=>r.projId===String(p.id))).length>0&&<button onClick={addWeeklyRow} style={{width:"100%",marginTop:8,padding:"7px",border:"1px dashed "+BORDER,borderRadius:7,background:"transparent",color:MUTED,fontSize:12,cursor:"pointer",fontFamily:FONT}}>+ Add Project</button>}
+            </div>
+          </Card>}
 
-          {/* Week summary + actions */}
-          <div style={{background:WHITE,border:"1px solid "+BORDER,borderRadius:10,padding:"14px 18px",marginTop:4,display:"flex",alignItems:"center",justifyContent:"space-between"}}>
+          {/* Summary + actions */}
+          <div style={{background:WHITE,border:"1px solid "+BORDER,borderRadius:10,padding:"14px 18px",marginTop:8,display:"flex",alignItems:"center",justifyContent:"space-between"}}>
             <div>
               <div style={{fontSize:10,fontWeight:700,color:MUTED,textTransform:"uppercase",letterSpacing:.5,marginBottom:4}}>Week Total</div>
               <div style={{display:"flex",alignItems:"baseline",gap:8}}>
                 <span style={{fontSize:26,fontWeight:700,color:totalHrs>capacity?DANGER:totalHrs>0?BLUE:MUTED}}>{totalHrs}h</span>
-                <span style={{fontSize:12,color:MUTED}}>of {capacity}h capacity</span>
-                <span style={{fontSize:12,fontWeight:600,color:utilColor(utilPct).fg}}>{utilPct}%</span>
+                <span style={{fontSize:12,color:MUTED}}>of {capacity}h ({utilPct}%)</span>
               </div>
-              {totalHrs>0&&<div style={{width:180,marginTop:6}}><Prog val={utilPct} h={5}/></div>}
+              {totalHrs>0&&<div style={{width:180,marginTop:5}}><Prog val={utilPct} h={5}/></div>}
             </div>
             {!locked&&user.employeeId&&<div style={{display:"flex",gap:10}}>
-              <Btn disabled={saving} onClick={saveDraft} style={{minWidth:120}}>{saving?<><Spin dark/>Saving...</>:"Save Draft"}</Btn>
+              <Btn disabled={saving} onClick={saveDraft} style={{minWidth:120}}>{saving?<><Spin dark/>{"Saving..."}</>:"Save Draft"}</Btn>
               <Btn primary disabled={submitting||saving} onClick={submit} style={{minWidth:160}}>{submitting?<><Spin/>{"Submitting..."}</>:"Submit for Approval"}</Btn>
             </div>}
             {locked&&<div style={{padding:"10px 16px",background:stMeta?.bg,borderRadius:8}}>
@@ -761,40 +794,59 @@ function Approvals({user,employees,timesheets,setTimesheets,leaves,setLeaves,ent
 
 /* ── Projects (with tasks, costs, billable) ───────────────── */
 function Projects({user,projects,setProjects,allocs,setAllocs,employees,entries,allTasks,setAllTasks,allCosts,setAllCosts}){
-  const [showNew,setShowNew]=useState(false);const [sel,setSel]=useState(null);const [selTab,setSelTab]=useState("team");const [saving,setSaving]=useState(false);
-  const [aForm,setAForm]=useState({empId:"",hrs:""});
+  const [showNew,setShowNew]=useState(false);
+  const [sel,setSel]=useState(null);
+  const [selTab,setSelTab]=useState("team");
+  const [saving,setSaving]=useState(false);
+  const [taskErr,setTaskErr]=useState("");
+  const [aForm,setAForm]=useState({empId:"",hrs:"",rateOverride:""});
   const [tForm,setTForm]=useState({name:"",desc:"",estHrs:"",billable:true});
   const [cForm,setCForm]=useState({desc:"",amount:"",category:"Material",date:""});
-
-  const [form,setForm]=useState({name:"",client:"",status:"planning",start:"",end:"",budget:"",billable:true,costBudget:""});
+  const [form,setForm]=useState({name:"",client:"",status:"planning",start:"",end:"",budget:"",billable:true,costBudget:"",projectRate:""});
   const F=k=>e=>setForm(p=>({...p,[k]:e.target.value}));
   const canEdit=user.role==="admin"||user.role==="manager";
 
-  // Load tasks and costs when project expanded
-
-
   const addProj=async()=>{
     if(!form.name)return;setSaving(true);
-    const{data,error}=await sb.from("projects").insert({name:form.name,client:form.client,status:form.status,start_date:form.start||null,end_date:form.end||null,budget_hours:+form.budget||0,billable:form.billable,cost_budget:+form.costBudget||0}).select().single();
-    setSaving(false);if(!error&&data){setProjects(prev=>[...prev,toProj(data)]);setShowNew(false);setForm({name:"",client:"",status:"planning",start:"",end:"",budget:"",billable:true,costBudget:""});}
+    const{data,error}=await sb.from("projects").insert({name:form.name,client:form.client,status:form.status,start_date:form.start||null,end_date:form.end||null,budget_hours:+form.budget||0,billable:form.billable,cost_budget:+form.costBudget||0,project_rate:+form.projectRate||0}).select().single();
+    setSaving(false);
+    if(!error&&data){setProjects(prev=>[...prev,toProj(data)]);setShowNew(false);setForm({name:"",client:"",status:"planning",start:"",end:"",budget:"",billable:true,costBudget:"",projectRate:""});}
   };
   const addAlloc=async projId=>{
-    if(!aForm.empId||!aForm.hrs)return;const{data,error}=await sb.from("allocations").upsert({employee_id:aForm.empId,project_id:projId,hours_per_week:+aForm.hrs},{onConflict:"employee_id,project_id"}).select().single();
-    if(!error&&data){setAllocs(prev=>[...prev.filter(a=>!(String(a.empId)===String(aForm.empId)&&String(a.projId)===String(projId))),toAlloc(data)]);const pr=projects.find(p=>String(p.id)===String(projId));await notifyEmp(aForm.empId,"You have been added to project \""+( pr?.name||"a project")+"\" by "+user.name,"info");setAForm({empId:"",hrs:""});}
+    if(!aForm.empId||!aForm.hrs)return;
+    const{data,error}=await sb.from("allocations").upsert({employee_id:aForm.empId,project_id:projId,hours_per_week:+aForm.hrs,rate_override:aForm.rateOverride?+aForm.rateOverride:null},{onConflict:"employee_id,project_id"}).select().single();
+    if(!error&&data){
+      setAllocs(prev=>[...prev.filter(a=>!(String(a.empId)===String(aForm.empId)&&String(a.projId)===String(projId))),toAlloc(data)]);
+      const pr=projects.find(p=>String(p.id)===String(projId));
+      await notifyEmp(aForm.empId,"You have been added to project \""+(pr?.name||"a project")+"\" by "+user.name,"info");
+      setAForm({empId:"",hrs:"",rateOverride:""});
+    }
   };
-  const removeAlloc=async id=>{const alloc=allocs.find(a=>a.id===id);const{error}=await sb.from("allocations").delete().eq("id",id);if(!error){setAllocs(prev=>prev.filter(a=>a.id!==id));if(alloc){const pr=projects.find(p=>String(p.id)===String(alloc.projId));await notifyEmp(alloc.empId,"You have been removed from project \""+( pr?.name||"a project")+"\" by "+user.name,"warn");}}};
+  const removeAlloc=async id=>{
+    const alloc=allocs.find(a=>a.id===id);
+    const{error}=await sb.from("allocations").delete().eq("id",id);
+    if(!error){
+      setAllocs(prev=>prev.filter(a=>a.id!==id));
+      if(alloc){const pr=projects.find(p=>String(p.id)===String(alloc.projId));await notifyEmp(alloc.empId,"You have been removed from project \""+(pr?.name||"a project")+"\" by "+user.name,"warn");}
+    }
+  };
   const addTask=async projId=>{
-    if(!tForm.name)return;const{data,error}=await sb.from("project_tasks").insert({project_id:projId,name:tForm.name,description:tForm.desc,estimated_hours:+tForm.estHrs||0,billable:tForm.billable,status:"active"}).select().single();
-    if(!error&&data){setAllTasks(prev=>[...prev,toTask(data)]);setTForm({name:"",desc:"",estHrs:"",billable:true});}
+    setTaskErr("");
+    if(!tForm.name.trim()){setTaskErr("Task name is required.");return;}
+    const payload={project_id:projId,name:tForm.name.trim(),description:tForm.desc.trim(),estimated_hours:+tForm.estHrs||0,billable:tForm.billable,status:"active"};
+    const{data,error}=await sb.from("project_tasks").insert(payload).select().single();
+    if(error){setTaskErr("Error: "+error.message);return;}
+    if(data){setAllTasks(prev=>[...prev,toTask(data)]);setTForm({name:"",desc:"",estHrs:"",billable:true});}
   };
   const removeTask=async id=>{const{error}=await sb.from("project_tasks").delete().eq("id",id);if(!error)setAllTasks(prev=>prev.filter(t=>t.id!==id));};
   const addCost=async projId=>{
-    if(!cForm.desc||!cForm.amount)return;const{data,error}=await sb.from("project_costs").insert({project_id:projId,description:cForm.desc,amount:+cForm.amount,category:cForm.category,date:cForm.date||new Date().toISOString().slice(0,10)}).select().single();
+    if(!cForm.desc||!cForm.amount)return;
+    const{data,error}=await sb.from("project_costs").insert({project_id:projId,description:cForm.desc,amount:+cForm.amount,category:cForm.category,date:cForm.date||new Date().toISOString().slice(0,10)}).select().single();
     if(!error&&data){setAllCosts(prev=>[...prev,toCost(data)]);setCForm({desc:"",amount:"",category:"Material",date:""});}
   };
   const removeCost=async id=>{const{error}=await sb.from("project_costs").delete().eq("id",id);if(!error)setAllCosts(prev=>prev.filter(c=>c.id!==id));};
   const updateStatus=async(projId,status)=>{const{error}=await sb.from("projects").update({status}).eq("id",projId);if(!error)setProjects(prev=>prev.map(p=>p.id===projId?{...p,status}:p));};
-  const toggleBillable=async(projId,billable)=>{const{error}=await sb.from("projects").update({billable}).eq("id",projId);if(!error)setProjects(prev=>prev.map(p=>p.id===projId?{...p,billable}:p));};
+  const updateProj=async(projId,fields)=>{const{error}=await sb.from("projects").update(fields).eq("id",projId);if(!error)setProjects(prev=>prev.map(p=>p.id===projId?{...p,...Object.fromEntries(Object.entries(fields).map(([k,v])=>[k==="project_rate"?"projectRate":k==="cost_budget"?"costBudget":k,v]))}:p));};
 
   return(
     <div style={{fontFamily:FONT}}>
@@ -802,23 +854,31 @@ function Projects({user,projects,setProjects,allocs,setAllocs,employees,entries,
         <div><h1 style={{fontSize:21,fontWeight:700,color:TEXT,margin:"0 0 3px"}}>Projects</h1><p style={{color:MUTED,fontSize:13,margin:0}}>{projects.length} projects</p></div>
         {canEdit&&<Btn primary onClick={()=>setShowNew(v=>!v)}>+ New Project</Btn>}
       </div>
+
       {showNew&&<Card style={{marginBottom:14,border:"1px solid "+BLUE+"44",background:"#F8FAFF"}}>
-        <div style={{fontSize:14,fontWeight:600,marginBottom:14}}>Create Project</div>
-        <div style={{display:"grid",gridTemplateColumns:"2fr 1fr 1fr",gap:0}}>
-          <div style={{paddingRight:12}}><Inp label="Project Name" value={form.name} onChange={F("name")} required/><Inp label="Client / Organization" value={form.client} onChange={F("client")}/></div>
-          <div style={{paddingRight:12}}><Inp label="Start Date" type="date" value={form.start} onChange={F("start")}/><Inp label="End Date" type="date" value={form.end} onChange={F("end")}/></div>
+        <div style={{fontSize:14,fontWeight:600,marginBottom:14}}>New Project</div>
+        <div style={{display:"grid",gridTemplateColumns:"2fr 1fr 1fr",gap:12}}>
+          <div>
+            <Inp label="Project Name" value={form.name} onChange={F("name")} required placeholder="e.g. Website Redesign"/>
+            <Inp label="Client / Organization" value={form.client} onChange={F("client")} placeholder="Acme Corp"/>
+          </div>
+          <div>
+            <Inp label="Start Date" type="date" value={form.start} onChange={F("start")}/>
+            <Inp label="End Date"   type="date" value={form.end}   onChange={F("end")}/>
+            <Inp label="Budget (hours)" type="number" value={form.budget} onChange={F("budget")} placeholder="0"/>
+          </div>
           <div>
             <SelF label="Status" value={form.status} onChange={F("status")} options={["planning","active","review","completed"].map(s=>({value:s,label:s[0].toUpperCase()+s.slice(1)}))}/>
-            <Inp label="Budget (hours)" type="number" value={form.budget} onChange={F("budget")} placeholder="0"/>
-            <Inp label="Cost Budget ($)" type="number" value={form.costBudget} onChange={F("costBudget")} placeholder="0"/>
-            <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:14}}>
-              <input type="checkbox" id="bill-new" checked={form.billable} onChange={e=>setForm(p=>({...p,billable:e.target.checked}))} style={{width:16,height:16,accentColor:BLUE}}/>
-              <label htmlFor="bill-new" style={{fontSize:13,color:TEXT,cursor:"pointer"}}>Billable project</label>
+            <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:10,padding:"8px 12px",background:form.billable?"#ECFDF5":"#F1F5F9",borderRadius:8,border:"1px solid "+(form.billable?"#6EE7B7":BORDER)}}>
+              <input type="checkbox" id="bill-chk" checked={form.billable} onChange={e=>setForm(p=>({...p,billable:e.target.checked}))} style={{width:16,height:16,accentColor:BLUE,cursor:"pointer"}}/>
+              <label htmlFor="bill-chk" style={{fontSize:13,fontWeight:600,color:form.billable?"#065F46":MUTED,cursor:"pointer"}}>{form.billable?"Billable project":"Non-billable project"}</label>
             </div>
+            {form.billable&&<Inp label="Project Rate ($/hr, overrides person rate)" type="number" value={form.projectRate} onChange={F("projectRate")} placeholder="0 = use person rate"/>}
+            {!form.billable&&<Inp label="Cost Budget ($)" type="number" value={form.costBudget} onChange={F("costBudget")} placeholder="0"/>}
           </div>
         </div>
         <div style={{display:"flex",gap:8}}>
-          <Btn primary small disabled={saving} onClick={addProj}>{saving?<Spin/>:"Create Project"}</Btn>
+          <Btn primary small disabled={saving} onClick={addProj}>{saving?<><Spin/>...</>:"Create Project"}</Btn>
           <Btn small onClick={()=>setShowNew(false)}>Cancel</Btn>
         </div>
       </Card>}
@@ -829,143 +889,176 @@ function Projects({user,projects,setProjects,allocs,setAllocs,employees,entries,
           const isOpen=sel===p.id;
           const loggedHrs=entries.filter(e=>String(e.projId)===String(p.id)).reduce((s,e)=>s+e.hours,0);
           const budgetPct=p.budgetHours>0?Math.round((loggedHrs/p.budgetHours)*100):0;
-          const pTasks=allTasks.filter(t=>String(t.projId)===String(p.id));const pCosts=allCosts.filter(c=>String(c.projId)===String(p.id));
+          const pTasks=allTasks.filter(t=>String(t.projId)===String(p.id));
+          const pCosts=allCosts.filter(c=>String(c.projId)===String(p.id));
           const totalMaterialCost=pCosts.reduce((s,c)=>s+c.amount,0);
-          const laborCost=pAllocs.reduce((s,a)=>{const e=employees.find(em=>String(em.id)===String(a.empId));const hrs=entries.filter(en=>String(en.projId)===String(p.id)&&String(en.empId)===String(a.empId)).reduce((t,en)=>t+en.hours,0);return s+(e?.billingRate||0)*hrs;},0);
+          const laborCost=pAllocs.reduce((s,a)=>{
+            const e=employees.find(em=>String(em.id)===String(a.empId));
+            const hrs=entries.filter(en=>String(en.projId)===String(p.id)&&String(en.empId)===String(a.empId)).reduce((t,en)=>t+en.hours,0);
+            return s+effectiveRate(e,a,p)*hrs;
+          },0);
           const totalProjectCost=laborCost+totalMaterialCost;
           const unassigned=employees.filter(e=>e.active&&!pAllocs.find(a=>String(a.empId)===String(e.id)));
+
           return(
             <Card key={p.id} style={{padding:0,overflow:"hidden"}}>
-              <div style={{padding:"14px 18px",cursor:"pointer"}} onClick={()=>{setSel(isOpen?null:p.id);setSelTab("team");}}>
+              {/* Project header row */}
+              <div style={{padding:"14px 18px",cursor:"pointer"}} onClick={()=>{setSel(isOpen?null:p.id);setSelTab("team");setTaskErr("");}}>
                 <div style={{display:"flex",alignItems:"center",gap:12}}>
                   <div style={{flex:1}}>
                     <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:6,flexWrap:"wrap"}}>
                       <span style={{fontSize:14,fontWeight:600,color:TEXT}}>{p.name}</span>
                       <Badge s={p.status}/>
-                      {p.billable?<span style={{fontSize:10,background:"#ECFDF5",color:"#065F46",borderRadius:20,padding:"2px 8px",fontWeight:600}}>Billable</span>:<span style={{fontSize:10,background:"#F1F5F9",color:MUTED,borderRadius:20,padding:"2px 8px",fontWeight:600}}>Non-Billable</span>}
-                      <span style={{fontSize:12,color:MUTED}}>{p.client}</span>
+                      <span style={{fontSize:10,background:p.billable?"#ECFDF5":"#F1F5F9",color:p.billable?"#065F46":MUTED,borderRadius:20,padding:"2px 9px",fontWeight:600}}>{p.billable?"Billable":"Non-Billable"}</span>
+                      {p.client&&<span style={{fontSize:12,color:MUTED}}>{p.client}</span>}
                     </div>
-                    <div style={{display:"flex",alignItems:"center",gap:14,flexWrap:"wrap"}}>
-                      {p.budgetHours>0&&<div style={{display:"flex",alignItems:"center",gap:8,width:180}}><Prog val={budgetPct}/><span style={{fontSize:11,color:MUTED,whiteSpace:"nowrap"}}>{loggedHrs}h / {p.budgetHours}h</span></div>}
-                      <span style={{fontSize:12,color:MUTED}}>{pAllocs.length} members</span>
-                      {p.billable&&laborCost>0&&<span style={{fontSize:12,fontWeight:600,color:"#065F46",background:"#ECFDF5",borderRadius:20,padding:"2px 9px"}}>Labor: ${laborCost.toLocaleString()}</span>}
-                      {totalMaterialCost>0&&<span style={{fontSize:12,fontWeight:600,color:"#92400E",background:"#FFFBEB",borderRadius:20,padding:"2px 9px"}}>Materials: ${totalMaterialCost.toLocaleString()}</span>}
-                      {(laborCost>0||totalMaterialCost>0)&&p.costBudget>0&&<span style={{fontSize:12,fontWeight:600,color:totalProjectCost>p.costBudget?"#991B1B":MUTED}}>Total: ${totalProjectCost.toLocaleString()} / ${p.costBudget.toLocaleString()}</span>}
+                    <div style={{display:"flex",alignItems:"center",gap:12,flexWrap:"wrap"}}>
+                      {p.budgetHours>0&&<div style={{display:"flex",alignItems:"center",gap:6,width:160}}><Prog val={budgetPct}/><span style={{fontSize:11,color:MUTED,whiteSpace:"nowrap"}}>{loggedHrs}h/{p.budgetHours}h</span></div>}
+                      <span style={{fontSize:11,color:MUTED}}>{pAllocs.length} member{pAllocs.length!==1?"s":""}</span>
                       {pTasks.length>0&&<span style={{fontSize:11,color:MUTED}}>{pTasks.length} task{pTasks.length!==1?"s":""}</span>}
-                      {p.start&&<span style={{fontSize:11,color:MUTED}}>{p.start} to {p.end}</span>}
+                      {p.billable&&laborCost>0&&<span style={{fontSize:11,fontWeight:600,color:"#065F46",background:"#ECFDF5",borderRadius:20,padding:"2px 8px"}}>Labor: ${laborCost.toLocaleString()}</span>}
+                      {totalMaterialCost>0&&<span style={{fontSize:11,fontWeight:600,color:"#92400E",background:"#FFFBEB",borderRadius:20,padding:"2px 8px"}}>Materials: ${totalMaterialCost.toLocaleString()}</span>}
+                      {totalProjectCost>0&&<span style={{fontSize:11,fontWeight:600,color:(totalProjectCost>p.costBudget&&p.costBudget>0)?DANGER:MUTED}}>Total: ${totalProjectCost.toLocaleString()}</span>}
                     </div>
                   </div>
                   <div style={{display:"flex",gap:3}}>{pAllocs.slice(0,4).map(a=>{const e=employees.find(em=>String(em.id)===String(a.empId));return e?<Av key={a.id} name={e.name} color={e.color||BLUE} sz={26}/>:null;})}</div>
-                  <span style={{color:MUTED,marginLeft:8,fontSize:13}}>{isOpen?"▲":"▼"}</span>
+                  <span style={{color:MUTED,fontSize:13,marginLeft:8}}>{isOpen?"^":"v"}</span>
                 </div>
               </div>
-              {isOpen&&<div style={{borderTop:"1px solid #F1F5F9",background:"#F8FAFF"}}>
+
+              {isOpen&&<div style={{borderTop:"1px solid #F1F5F9",background:"#FAFBFF"}}>
                 {/* Sub-tabs */}
-                <div style={{display:"flex",gap:0,borderBottom:"1px solid "+BORDER}}>
-                  {[{id:"team",label:"Team & Allocation"},{id:"tasks",label:"Tasks"},{id:"costs",label:"Costs & Materials"},{id:"settings",label:"Settings"}].map(t=>(
-                    <button key={t.id} onClick={()=>setSelTab(t.id)} style={{padding:"10px 18px",border:"none",background:"none",cursor:"pointer",fontSize:12,fontWeight:selTab===t.id?600:400,color:selTab===t.id?BLUE:MUTED,borderBottom:selTab===t.id?"2px solid "+BLUE:"2px solid transparent",fontFamily:FONT}}>{t.label}</button>
+                <div style={{display:"flex",borderBottom:"1px solid "+BORDER}}>
+                  {[{id:"team",label:"Team"},{id:"tasks",label:"Tasks ("+pTasks.length+")"},{id:"costs",label:"Costs"},{id:"settings",label:"Settings"}].map(t=>(
+                    <button key={t.id} onClick={()=>{setSelTab(t.id);setTaskErr("");}} style={{padding:"10px 18px",border:"none",background:"none",cursor:"pointer",fontSize:12,fontWeight:selTab===t.id?600:400,color:selTab===t.id?BLUE:MUTED,borderBottom:selTab===t.id?"2px solid "+BLUE:"2px solid transparent",fontFamily:FONT}}>{t.label}</button>
                   ))}
                 </div>
                 <div style={{padding:"16px 18px"}}>
+
+                  {/* ── TEAM TAB ── */}
                   {selTab==="team"&&<div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:16}}>
                     <div>
-                      <div style={{fontSize:12,fontWeight:600,color:MUTED,marginBottom:10,textTransform:"uppercase",letterSpacing:.4}}>Allocated Team ({pAllocs.length})</div>
-                      {pAllocs.length===0&&<div style={{color:MUTED,fontSize:13}}>No members yet.</div>}
-                      {pAllocs.map(a=>{const emp=employees.find(e=>String(e.id)===String(a.empId));if(!emp)return null;const pct=emp.capacity>0?Math.round((a.hoursPerWeek/emp.capacity)*100):0;return(
-                        <div key={a.id} style={{display:"flex",alignItems:"center",gap:10,padding:"8px 0",borderBottom:"1px solid #F1F5F9"}}>
-                          <Av name={emp.name} color={emp.color||BLUE} sz={26}/>
-                          <div style={{flex:1}}><div style={{fontSize:13,fontWeight:500}}>{emp.name}</div><div style={{fontSize:11,color:MUTED}}>{emp.role}</div></div>
-                          <span style={{fontSize:12,fontWeight:600}}>{a.hoursPerWeek}h/wk</span>
-                          <span style={{fontSize:11,background:"#EFF6FF",color:BLUE,padding:"2px 7px",borderRadius:5}}>{pct}%</span>
-                          {emp.billingRate>0&&<span style={{fontSize:11,background:"#ECFDF5",color:"#065F46",padding:"2px 7px",borderRadius:5}}>${emp.billingRate}/hr</span>}
-                          {canEdit&&<button onClick={()=>removeAlloc(a.id)} style={{border:"none",background:"none",color:MUTED,cursor:"pointer",fontSize:14}}>x</button>}
-                        </div>
-                      );})}
+                      <div style={{fontSize:11,fontWeight:600,color:MUTED,marginBottom:10,textTransform:"uppercase",letterSpacing:.4}}>Team ({pAllocs.length})</div>
+                      {pAllocs.length===0&&<div style={{color:MUTED,fontSize:13,fontStyle:"italic"}}>No members yet.</div>}
+                      {pAllocs.map(a=>{
+                        const emp=employees.find(e=>String(e.id)===String(a.empId));if(!emp)return null;
+                        const rate=effectiveRate(emp,a,p);
+                        const hrs=entries.filter(en=>String(en.projId)===String(p.id)&&String(en.empId)===String(emp.id)).reduce((s,en)=>s+en.hours,0);
+                        return(
+                          <div key={a.id} style={{display:"flex",alignItems:"center",gap:10,padding:"8px 0",borderBottom:"1px solid #F1F5F9"}}>
+                            <Av name={emp.name} color={emp.color||BLUE} sz={26}/>
+                            <div style={{flex:1}}>
+                              <div style={{fontSize:13,fontWeight:500}}>{emp.name}</div>
+                              <div style={{fontSize:10,color:MUTED}}>{a.hoursPerWeek}h/wk allocated - {hrs}h logged{rate>0?" - $"+rate+"/hr":""}{a.rateOverride?"(custom)":p.projectRate>0?" (proj rate)":emp.billingRate>0?" (person rate)":""}</div>
+                            </div>
+                            {canEdit&&<button onClick={()=>removeAlloc(a.id)} style={{border:"none",background:"none",color:MUTED,cursor:"pointer",fontSize:14,padding:"4px 6px"}}>x</button>}
+                          </div>
+                        );
+                      })}
                     </div>
                     {canEdit&&<div>
-                      <div style={{fontSize:12,fontWeight:600,color:MUTED,marginBottom:10,textTransform:"uppercase",letterSpacing:.4}}>Add Member</div>
-                      <SelF label="" value={aForm.empId} onChange={e=>setAForm(f=>({...f,empId:e.target.value}))} options={[{value:"",label:"Select employee..."},...unassigned.map(e=>({value:String(e.id),label:e.name+(e.billingRate>0?" ($"+e.billingRate+"/hr)":"")+" ("+e.capacity+"h cap)"}))]}/>
-                      <Inp label="Hours per week" type="number" value={aForm.hrs} onChange={e=>setAForm(f=>({...f,hrs:e.target.value}))} placeholder="20"/>
-                      <Btn primary small onClick={()=>addAlloc(p.id)}>Add to Project</Btn>
+                      <div style={{fontSize:11,fontWeight:600,color:MUTED,marginBottom:10,textTransform:"uppercase",letterSpacing:.4}}>Add Member</div>
+                      <SelF label="Employee" value={aForm.empId} onChange={e=>setAForm(f=>({...f,empId:e.target.value}))} options={[{value:"",label:"Select employee..."},...unassigned.map(e=>({value:String(e.id),label:e.name+(e.billingRate>0?" ($"+e.billingRate+"/hr)":"(no rate)")+" - "+e.capacity+"h cap"}))]}/>
+                      <Inp label="Hours per week" type="number" value={aForm.hrs} onChange={e=>setAForm(f=>({...f,hrs:e.target.value}))} placeholder="e.g. 20"/>
+                      <Inp label={p.billable?"Custom rate $/hr (leave blank to use "+( p.projectRate>0?"project rate $"+p.projectRate:employees.find(e=>String(e.id)===aForm.empId)?.billingRate>0?"person rate":"no rate")+")":"Rate $/hr (optional)"} type="number" value={aForm.rateOverride} onChange={e=>setAForm(f=>({...f,rateOverride:e.target.value}))} placeholder="Leave blank to auto-inherit"/>
+                      <Btn primary small onClick={()=>addAlloc(p.id)} disabled={!aForm.empId||!aForm.hrs}>Add to Project</Btn>
                     </div>}
                   </div>}
+
+                  {/* ── TASKS TAB ── */}
                   {selTab==="tasks"&&<div>
-                    {pTasks.map(t=>{const actual=entries.filter(e=>e.taskId===t.id).reduce((s,e)=>s+e.hours,0);return(
-                      <div key={t.id} style={{display:"flex",alignItems:"center",gap:10,padding:"8px 10px",background:WHITE,borderRadius:8,border:"1px solid "+BORDER,marginBottom:7}}>
-                        <div style={{flex:1}}>
-                          <div style={{fontSize:13,fontWeight:500}}>{t.name}</div>
-                          {t.desc&&<div style={{fontSize:11,color:MUTED}}>{t.desc}</div>}
-                        </div>
-                        <span style={{fontSize:11,background:t.billable?"#ECFDF5":"#F1F5F9",color:t.billable?"#065F46":MUTED,borderRadius:20,padding:"2px 8px",fontWeight:600}}>{t.billable?"Billable":"Non-Bill"}</span>
-                        {t.estHrs>0&&<span style={{fontSize:12,color:MUTED}}>{actual}h / {t.estHrs}h est</span>}
-                        {canEdit&&<button onClick={()=>removeTask(t.id)} style={{border:"none",background:"none",color:MUTED,cursor:"pointer",fontSize:14}}>x</button>}
+                    <div style={{marginBottom:12}}>
+                      {pTasks.length===0&&<div style={{padding:"16px",background:"#F8FAFF",borderRadius:8,border:"1px solid "+BORDER,textAlign:"center",color:MUTED,fontSize:13,marginBottom:12}}>No tasks yet. Add tasks below to enable task-level time logging in timesheets.</div>}
+                      {pTasks.map(t=>{
+                        const actual=entries.filter(e=>e.taskId===t.id).reduce((s,e)=>s+e.hours,0);
+                        return(
+                          <div key={t.id} style={{display:"flex",alignItems:"center",gap:10,padding:"9px 12px",background:WHITE,borderRadius:8,border:"1px solid "+BORDER,marginBottom:7}}>
+                            <div style={{flex:1}}>
+                              <div style={{fontSize:13,fontWeight:500,color:TEXT}}>{t.name}</div>
+                              {t.desc&&<div style={{fontSize:11,color:MUTED}}>{t.desc}</div>}
+                            </div>
+                            <span style={{fontSize:11,background:t.billable?"#ECFDF5":"#F1F5F9",color:t.billable?"#065F46":MUTED,borderRadius:20,padding:"2px 8px",fontWeight:600}}>{t.billable?"Billable":"Non-Bill"}</span>
+                            {t.estHrs>0&&<span style={{fontSize:11,color:MUTED}}>{actual}h / {t.estHrs}h est</span>}
+                            {canEdit&&<button onClick={()=>removeTask(t.id)} style={{border:"none",background:"none",color:MUTED,cursor:"pointer",fontSize:14,padding:"4px 6px"}}>x</button>}
+                          </div>
+                        );
+                      })}
+                    </div>
+                    {canEdit&&<div style={{background:"#F8FAFF",border:"1px solid "+BORDER,borderRadius:10,padding:"14px"}}>
+                      <div style={{fontSize:12,fontWeight:600,color:TEXT,marginBottom:10}}>Add Task</div>
+                      {taskErr&&<Alrt type="error" msg={taskErr}/>}
+                      <div style={{display:"grid",gridTemplateColumns:"1fr 90px",gap:10,marginBottom:10}}>
+                        <Inp label="Task Name *" value={tForm.name} onChange={e=>setTForm(f=>({...f,name:e.target.value}))} placeholder="e.g. JIRA-220 Backend API, Design review, Testing" small/>
+                        <Inp label="Estimated Hrs" type="number" value={tForm.estHrs} onChange={e=>setTForm(f=>({...f,estHrs:e.target.value}))} placeholder="0" small/>
                       </div>
-                    );})}
-                    {canEdit&&<div style={{display:"grid",gridTemplateColumns:"1fr 80px 80px auto auto",gap:8,alignItems:"end",marginTop:12}}>
-                      <Inp label="Task Name" value={tForm.name} onChange={e=>setTForm(f=>({...f,name:e.target.value}))} placeholder="e.g. Backend API development" small/>
-                      <Inp label="Est. Hours" type="number" value={tForm.estHrs} onChange={e=>setTForm(f=>({...f,estHrs:e.target.value}))} placeholder="40" small/>
-                      <div style={{marginBottom:14}}>
-                        <label style={{fontSize:11,fontWeight:500,color:TEXT,display:"block",marginBottom:5}}>Billable</label>
-                        <input type="checkbox" checked={tForm.billable} onChange={e=>setTForm(f=>({...f,billable:e.target.checked}))} style={{width:16,height:16,accentColor:BLUE,marginTop:6}}/>
+                      <Inp label="Description (optional)" value={tForm.desc} onChange={e=>setTForm(f=>({...f,desc:e.target.value}))} placeholder="Brief description of this task" small/>
+                      <div style={{display:"flex",alignItems:"center",justifyContent:"space-between"}}>
+                        <label style={{display:"flex",alignItems:"center",gap:8,cursor:"pointer",fontSize:13,color:TEXT}}>
+                          <input type="checkbox" checked={tForm.billable} onChange={e=>setTForm(f=>({...f,billable:e.target.checked}))} style={{width:16,height:16,accentColor:BLUE,cursor:"pointer"}}/>
+                          This task is billable
+                        </label>
+                        <Btn primary onClick={()=>addTask(p.id)}>+ Add Task</Btn>
                       </div>
-                      <div style={{paddingBottom:14}}><Btn primary small onClick={()=>addTask(p.id)}>Add Task</Btn></div>
                     </div>}
                   </div>}
+
+                  {/* ── COSTS TAB ── */}
                   {selTab==="costs"&&<div>
-                    {/* Resource-level labor costs */}
                     {pAllocs.length>0&&<div style={{marginBottom:16}}>
-                      <div style={{fontSize:12,fontWeight:600,color:MUTED,marginBottom:8,textTransform:"uppercase",letterSpacing:.4}}>Labor Cost by Resource</div>
-                      {pAllocs.map(a=>{const e=employees.find(em=>String(em.id)===String(a.empId));if(!e)return null;const hrs=entries.filter(en=>String(en.projId)===String(p.id)&&String(en.empId)===String(a.empId)).reduce((t,en)=>t+en.hours,0);const cost=(e.billingRate||0)*hrs;return(
+                      <div style={{fontSize:11,fontWeight:600,color:MUTED,marginBottom:8,textTransform:"uppercase",letterSpacing:.4}}>Labor Cost by Resource</div>
+                      {pAllocs.map(a=>{const e=employees.find(em=>String(em.id)===String(a.empId));if(!e)return null;const hrs=entries.filter(en=>String(en.projId)===String(p.id)&&String(en.empId)===String(a.empId)).reduce((t,en)=>t+en.hours,0);const rate=effectiveRate(e,a,p);const cost=rate*hrs;return(
                         <div key={a.id} style={{display:"flex",alignItems:"center",gap:10,padding:"8px 12px",background:"#F8FAFF",borderRadius:8,marginBottom:6,border:"1px solid "+BORDER}}>
                           <Av name={e.name} color={e.color||BLUE} sz={24}/>
-                          <div style={{flex:1}}><div style={{fontSize:13,fontWeight:500}}>{e.name}</div><div style={{fontSize:11,color:MUTED}}>{hrs}h logged {e.billingRate>0?"@ $"+e.billingRate+"/hr":"(no rate set)"}</div></div>
+                          <div style={{flex:1}}><div style={{fontSize:13,fontWeight:500}}>{e.name}</div><div style={{fontSize:11,color:MUTED}}>{hrs}h @ ${rate}/hr{a.rateOverride?"(custom rate)":p.projectRate>0?" (project rate)":e.billingRate>0?" (person rate)":" (no rate)"}</div></div>
                           <span style={{fontWeight:700,color:cost>0?"#065F46":MUTED}}>{cost>0?"$"+cost.toLocaleString():"-"}</span>
                         </div>
                       );})}
-                      <div style={{display:"flex",justifyContent:"space-between",padding:"8px 12px",background:"#ECFDF5",borderRadius:8,border:"1px solid #6EE7B7"}}>
-                        <span style={{fontSize:13,fontWeight:600}}>Total Labor Cost</span>
-                        <span style={{fontWeight:700,color:"#065F46"}}>${laborCost.toLocaleString()}</span>
+                      <div style={{display:"flex",justifyContent:"space-between",padding:"8px 12px",background:"#ECFDF5",borderRadius:8,border:"1px solid #6EE7B7",marginTop:4}}>
+                        <span style={{fontSize:13,fontWeight:600}}>Total Labor</span><span style={{fontWeight:700,color:"#065F46"}}>${laborCost.toLocaleString()}</span>
                       </div>
                     </div>}
-                    {/* Material / non-labor costs */}
-                    <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
-                      <div style={{fontSize:12,fontWeight:600,color:MUTED,textTransform:"uppercase",letterSpacing:.4}}>Materials & Expenses</div>
-                      <div style={{fontSize:13}}><span style={{fontWeight:600}}>Materials: </span><span style={{fontWeight:700,color:"#92400E"}}>${totalMaterialCost.toLocaleString()}</span>{p.costBudget>0&&<span style={{color:MUTED}}> / ${p.costBudget.toLocaleString()} budget</span>}</div>
-                    </div>
+                    <div style={{fontSize:11,fontWeight:600,color:MUTED,marginBottom:8,textTransform:"uppercase",letterSpacing:.4}}>Materials & Non-Labor Costs</div>
                     {pCosts.map(c=>(
-                      <div key={c.id} style={{display:"flex",alignItems:"center",gap:10,padding:"8px 10px",background:WHITE,borderRadius:8,border:"1px solid "+BORDER,marginBottom:7}}>
+                      <div key={c.id} style={{display:"flex",alignItems:"center",gap:10,padding:"8px 12px",background:WHITE,borderRadius:8,border:"1px solid "+BORDER,marginBottom:7}}>
                         <div style={{flex:1}}><div style={{fontSize:13,fontWeight:500}}>{c.desc}</div><div style={{fontSize:11,color:MUTED}}>{c.category} - {c.date}</div></div>
                         <span style={{fontWeight:700,color:DANGER}}>${c.amount.toLocaleString()}</span>
                         {canEdit&&<button onClick={()=>removeCost(c.id)} style={{border:"none",background:"none",color:MUTED,cursor:"pointer",fontSize:14}}>x</button>}
                       </div>
                     ))}
-                    {pCosts.length===0&&<div style={{color:MUTED,fontSize:13,padding:"12px 0",fontStyle:"italic"}}>No material costs logged yet.</div>}
-                    {canEdit&&<div style={{display:"grid",gridTemplateColumns:"2fr 100px 120px 80px auto",gap:8,alignItems:"end",marginTop:12,paddingTop:12,borderTop:"1px solid "+BORDER}}>
+                    {pCosts.length===0&&<div style={{color:MUTED,fontSize:13,fontStyle:"italic",marginBottom:8}}>No material costs yet.</div>}
+                    {canEdit&&<div style={{display:"grid",gridTemplateColumns:"2fr 90px 110px 80px auto",gap:8,alignItems:"end",padding:"12px 0",borderTop:"1px solid "+BORDER,marginTop:8}}>
                       <Inp label="Description" value={cForm.desc} onChange={e=>setCForm(f=>({...f,desc:e.target.value}))} placeholder="Material, license, travel..." small/>
-                      <Inp label="Amount ($)" type="number" value={cForm.amount} onChange={e=>setCForm(f=>({...f,amount:e.target.value}))} placeholder="0" small/>
+                      <Inp label="Amount $" type="number" value={cForm.amount} onChange={e=>setCForm(f=>({...f,amount:e.target.value}))} placeholder="0" small/>
                       <SelF label="Category" value={cForm.category} onChange={e=>setCForm(f=>({...f,category:e.target.value}))} options={["Material","Equipment","License","Travel","Contractor","Other"].map(c=>({value:c,label:c}))} small/>
                       <Inp label="Date" type="date" value={cForm.date} onChange={e=>setCForm(f=>({...f,date:e.target.value}))} small/>
                       <div style={{paddingBottom:14}}><Btn primary small onClick={()=>addCost(p.id)}>Add</Btn></div>
                     </div>}
-                    {/* Total cost summary */}
-                    <div style={{display:"flex",justifyContent:"space-between",padding:"10px 14px",background:totalProjectCost>p.costBudget&&p.costBudget>0?"#FEF2F2":"#F8FAFF",borderRadius:8,marginTop:12,border:"1px solid "+(totalProjectCost>p.costBudget&&p.costBudget>0?"#FCA5A5":BORDER)}}>
-                      <span style={{fontSize:13,fontWeight:700}}>Total Project Cost (Labor + Materials)</span>
+                    <div style={{display:"flex",justifyContent:"space-between",padding:"10px 14px",background:totalProjectCost>p.costBudget&&p.costBudget>0?"#FEF2F2":"#F8FAFF",borderRadius:8,border:"1px solid "+(totalProjectCost>p.costBudget&&p.costBudget>0?"#FCA5A5":BORDER)}}>
+                      <span style={{fontSize:13,fontWeight:700}}>Total (Labor + Materials)</span>
                       <span style={{fontSize:15,fontWeight:700,color:totalProjectCost>p.costBudget&&p.costBudget>0?DANGER:"#065F46"}}>${totalProjectCost.toLocaleString()}</span>
                     </div>
                   </div>}
-                  {selTab==="settings"&&canEdit&&<div style={{maxWidth:400}}>
-                    <div style={{marginBottom:16}}>
-                      <div style={{fontSize:12,fontWeight:600,color:MUTED,marginBottom:8,textTransform:"uppercase",letterSpacing:.4}}>Billing</div>
-                      <label style={{display:"flex",alignItems:"center",gap:10,cursor:"pointer"}}>
-                        <input type="checkbox" checked={p.billable} onChange={e=>toggleBillable(p.id,e.target.checked)} style={{width:16,height:16,accentColor:BLUE}}/>
-                        <span style={{fontSize:13}}>This project is billable</span>
+
+                  {/* ── SETTINGS TAB ── */}
+                  {selTab==="settings"&&canEdit&&<div style={{maxWidth:480}}>
+                    <div style={{marginBottom:16,padding:"12px 14px",background:"#F8FAFF",borderRadius:9,border:"1px solid "+BORDER}}>
+                      <div style={{fontSize:11,fontWeight:600,color:MUTED,textTransform:"uppercase",letterSpacing:.4,marginBottom:10}}>Billing</div>
+                      <label style={{display:"flex",alignItems:"center",gap:10,cursor:"pointer",marginBottom:10}}>
+                        <input type="checkbox" checked={p.billable} onChange={e=>updateProj(p.id,{billable:e.target.checked})} style={{width:16,height:16,accentColor:BLUE,cursor:"pointer"}}/>
+                        <span style={{fontSize:13,fontWeight:500}}>{p.billable?"This project is billable":"This project is non-billable"}</span>
                       </label>
+                      {p.billable&&<div>
+                        <div style={{fontSize:12,color:MUTED,marginBottom:6}}>Project-wide rate (applies to all members who have no custom rate set). Leave at 0 to use each person's profile rate.</div>
+                        <div style={{display:"flex",gap:10,alignItems:"center"}}>
+                          <Inp label="Project Rate ($/hr)" type="number" value={String(p.projectRate||"")} onChange={e=>updateProj(p.id,{project_rate:+e.target.value||0})} placeholder="0" small/>
+                          <div style={{fontSize:11,color:MUTED,paddingTop:14}}>Rate hierarchy: Custom per-person > Project rate > Person profile rate</div>
+                        </div>
+                      </div>}
+                      {!p.billable&&<Inp label="Cost Budget ($)" type="number" value={String(p.costBudget||"")} onChange={e=>updateProj(p.id,{cost_budget:+e.target.value||0})} placeholder="0" small/>}
                     </div>
-                    <div style={{marginBottom:16}}>
-                      <div style={{fontSize:12,fontWeight:600,color:MUTED,marginBottom:8,textTransform:"uppercase",letterSpacing:.4}}>Project Status</div>
-                      <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
-                        {["planning","active","review","completed"].map(s=><button key={s} onClick={()=>updateStatus(p.id,s)} style={{padding:"5px 14px",borderRadius:20,border:"1px solid "+BORDER,background:p.status===s?BLUE:WHITE,color:p.status===s?"#fff":TEXT,fontSize:12,fontWeight:500,cursor:"pointer",fontFamily:FONT,textTransform:"capitalize"}}>{s}</button>)}
-                      </div>
+                    <div style={{fontSize:11,fontWeight:600,color:MUTED,textTransform:"uppercase",letterSpacing:.4,marginBottom:8}}>Project Status</div>
+                    <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
+                      {["planning","active","review","completed"].map(s=><button key={s} onClick={()=>updateStatus(p.id,s)} style={{padding:"6px 14px",borderRadius:20,border:"1px solid "+BORDER,background:p.status===s?BLUE:WHITE,color:p.status===s?"#fff":TEXT,fontSize:12,fontWeight:500,cursor:"pointer",fontFamily:FONT,textTransform:"capitalize"}}>{s}</button>)}
                     </div>
                   </div>}
                 </div>
@@ -973,13 +1066,13 @@ function Projects({user,projects,setProjects,allocs,setAllocs,employees,entries,
             </Card>
           );
         })}
-        {projects.length===0&&<div style={{textAlign:"center",padding:"60px 0",color:MUTED,fontSize:14,fontFamily:FONT}}>No projects yet.</div>}
+        {projects.length===0&&<div style={{textAlign:"center",padding:"60px 0",color:MUTED}}>No projects yet. Click "+ New Project" to create one.</div>}
       </div>
     </div>
   );
 }
 
-/* ── Utilization ──────────────────────────────────────────── */
+
 function Utilization({user,employees,allocs,entries,timesheets}){
   const WEEKS=recentWeeks(8);
   const [selWeek,setSelWeek]=useState(WEEKS[WEEKS.length-1]);
@@ -1273,7 +1366,10 @@ function Employees({user,employees,setEmployees,allocs,teams}){
     try{const res=await fetch("/api/invite",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({name:form.name,email:form.email,role:form.role,department:form.department,jobTitle:form.jobTitle,capacity:+form.capacity||40,teamId:form.teamId||null,phone:form.phone})});const data=await res.json();if(!res.ok)throw new Error(data.error||"Invite failed");
     setEmployees(prev=>[...prev,{id:data.employeeId||Date.now(),name:form.name,email:form.email,dept:form.department,role:form.jobTitle,capacity:+form.capacity||40,active:true,teamId:form.teamId||null,color:deptColor(form.department),appRole:form.role,billingRate:+form.billingRate||0}]);
     setOk("Invite sent to "+form.email);setForm(blank);setShowInvite(false);}catch(e){setErr(e.message);}finally{setLoading(false);}};
-  const saveEdit=async()=>{const{error}=await sb.from("employees").update({name:form.name,department:form.department,role:form.jobTitle,capacity:+form.capacity||40,active:form.active!=="false",phone:form.phone,team_id:form.teamId||null,billing_rate:+form.billingRate||0}).eq("id",editTarget.id);if(error){setErr(error.message);return;}if(form.teamId){await sb.from("team_members").upsert({team_id:form.teamId,employee_id:editTarget.id},{onConflict:"team_id,employee_id"});}let upd=false;const{data:au}=await sb.from("app_users").select("id").eq("employee_id",editTarget.id).single();if(au){await sb.from("app_users").update({role:form.role}).eq("id",au.id);upd=true;}if(!upd){const{data:auE}=await sb.from("app_users").select("id").eq("email",editTarget.email).single();if(auE)await sb.from("app_users").update({role:form.role}).eq("id",auE.id);}setEmployees(prev=>prev.map(e=>e.id===editTarget.id?{...e,name:form.name,dept:form.department,role:form.jobTitle,capacity:+form.capacity||40,active:form.active!=="false",phone:form.phone,teamId:form.teamId||null,billingRate:+form.billingRate||0,appRole:form.role}:e));setShowEdit(false);setEditTarget(null);setOk("Employee updated.");};
+  const resendInvite=async emp=>{
+    try{const res=await fetch("/api/invite",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({name:emp.name,email:emp.email,role:emp.appRole||"user",department:emp.dept,jobTitle:emp.role,capacity:emp.capacity,phone:emp.phone||""})});const d=await res.json();if(res.ok)setOk("Invite resent to "+emp.email);else setErr("Resend failed: "+(d.error||"unknown error"));}catch(e){setErr(e.message);}
+  };
+  const saveEdit=async()=>{const emailChanged=form.email&&form.email!==editTarget.email;const{error}=await sb.from("employees").update({name:form.name,email:form.email||editTarget.email,department:form.department,role:form.jobTitle,capacity:+form.capacity||40,active:form.active!=="false",phone:form.phone,team_id:form.teamId||null,billing_rate:+form.billingRate||0}).eq("id",editTarget.id);if(emailChanged)await sb.from("app_users").update({email:form.email,name:form.name}).eq("employee_id",editTarget.id);if(error){setErr(error.message);return;}if(form.teamId){await sb.from("team_members").upsert({team_id:form.teamId,employee_id:editTarget.id},{onConflict:"team_id,employee_id"});}let upd=false;const{data:au}=await sb.from("app_users").select("id").eq("employee_id",editTarget.id).single();if(au){await sb.from("app_users").update({role:form.role}).eq("id",au.id);upd=true;}if(!upd){const{data:auE}=await sb.from("app_users").select("id").eq("email",editTarget.email).single();if(auE)await sb.from("app_users").update({role:form.role}).eq("id",auE.id);}setEmployees(prev=>prev.map(e=>e.id===editTarget.id?{...e,name:form.name,email:form.email||e.email,dept:form.department,role:form.jobTitle,capacity:+form.capacity||40,active:form.active!=="false",phone:form.phone,teamId:form.teamId||null,billingRate:+form.billingRate||0,appRole:form.role}:e));setShowEdit(false);setEditTarget(null);setOk("Employee updated.");};
   const changeRole=async(emp,newRole)=>{let upd=false;const{data:au}=await sb.from("app_users").select("id").eq("employee_id",emp.id).single();if(au){await sb.from("app_users").update({role:newRole}).eq("id",au.id);upd=true;}if(!upd){const{data:auE}=await sb.from("app_users").select("id").eq("email",emp.email).single();if(auE)await sb.from("app_users").update({role:newRole}).eq("id",auE.id);}setEmployees(prev=>prev.map(e=>e.id===emp.id?{...e,appRole:newRole}:e));};
   const toggleActive=async emp=>{const{error}=await sb.from("employees").update({active:!emp.active}).eq("id",emp.id);if(!error)setEmployees(prev=>prev.map(e=>e.id===emp.id?{...e,active:!e.active}:e));};
   const deleteEmp=async emp=>{const{error}=await sb.from("employees").delete().eq("id",emp.id);if(!error){setEmployees(prev=>prev.filter(e=>e.id!==emp.id));setDelTarget(null);}else setErr(error.message);};
@@ -1360,15 +1456,18 @@ function Employees({user,employees,setEmployees,allocs,teams}){
             <Inp label="Phone"      value={form.phone}      onChange={F("phone")}/>
           </div>
           <div style={{paddingLeft:12}}>
+            <Inp label="Email Address" type="email" value={form.email||""} onChange={F("email")} placeholder={editTarget?.email}/>
             <Inp label="Weekly Capacity" type="number" value={form.capacity} onChange={F("capacity")}/>
-            <Inp label="Billing Rate ($/hr)" type="number" value={form.billingRate} onChange={F("billingRate")} placeholder="0"/>
+            <Inp label="Billing Rate ($/hr)" type="number" value={form.billingRate} onChange={F("billingRate")} placeholder="0 = use default"/>
             <SelF label="System Role" value={form.role} onChange={F("role")} options={[{value:"user",label:"User"},{value:"manager",label:"Manager"},{value:"admin",label:"Admin"}]}/>
             <SelF label="Team" value={form.teamId||""} onChange={F("teamId")} options={[{value:"",label:"No team"},...teams.map(t=>({value:String(t.id),label:t.name}))]}/>
             <SelF label="Status" value={form.active} onChange={F("active")} options={[{value:"true",label:"Active"},{value:"false",label:"Inactive"}]}/>
           </div>
         </div>
+        {form.email&&form.email!==editTarget?.email&&<div style={{padding:"8px 12px",background:"#FFFBEB",borderRadius:8,marginBottom:8,fontSize:12,color:"#92400E"}}>Email changed - you can resend invite after saving to notify the employee.</div>}
         <div style={{display:"flex",gap:10,marginTop:8,paddingTop:14,borderTop:"1px solid "+BORDER}}>
           <Btn primary full onClick={saveEdit}>Save Changes</Btn>
+          <Btn full onClick={()=>editTarget&&resendInvite(editTarget)} style={{color:BLUE,border:"1px solid "+BLUE}}>Resend Invite</Btn>
           <Btn full onClick={()=>{setShowEdit(false);setEditTarget(null);}}>Cancel</Btn>
         </div>
       </Modal>}
